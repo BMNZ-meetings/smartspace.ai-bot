@@ -1,0 +1,10 @@
+{
+    "name": "smartspace-proxy",
+    "version": "1.0.0",
+    "description": "Proxy function for Smartspace integration using Azure AD Auth",
+    "main": "main.js",
+    "dependencies": {
+        "@azure/identity": "^4.0.0",
+        "axios": "^1.6.0"
+    }
+}

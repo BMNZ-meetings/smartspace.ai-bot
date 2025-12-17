@@ -1,0 +1,9 @@
+{
+    "endpoints": {
+        "proxy": {
+            "method": "POST",
+            "file": "main.js",
+            "function": "main"
+        }
+    }
+}
