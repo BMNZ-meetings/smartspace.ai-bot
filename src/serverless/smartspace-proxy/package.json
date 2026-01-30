@@ -5,6 +5,10 @@
     "main": "main.js",
     "dependencies": {
         "@azure/identity": "^4.0.0",
-        "axios": "^1.6.0"
+        "axios": "^1.6.0",
+        "request": "^2.88.2"
+    },
+    "devDependencies": {
+        "esbuild": "^0.27.2"
     }
 }

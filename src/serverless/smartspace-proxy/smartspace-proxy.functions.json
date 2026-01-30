@@ -2,8 +2,16 @@
     "endpoints": {
         "proxy": {
             "method": "POST",
-            "file": "main.js",
-            "function": "main"
+            "file": "main.bundle.js",
+            "function": "main",
+            "secrets": [
+                "TENANT_ID",
+                "YOUR_APP_CLIENT_ID",
+                "YOUR_APP_CLIENT_SECRET",
+                "SMARTSPACE_API_APP_ID",
+                "SMARTSPACE_WORKSPACE_ID",
+                "SMARTSPACE_CHAT_API_URL"
+            ]
         }
     }
 }

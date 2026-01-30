@@ -5,20 +5,42 @@ const API_BASE_URL = '/_hcms/api'; // HubSpot serverless base path
 // const API_BASE_URL = 'http://localhost:3000/api'; 
 
 export const smartspaceService = {
-  
-  async sendChat(message, history = []) {
+
+  async sendChat(message, history = [], email = null, messageThreadId = null) {
     try {
-      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy/proxy`, {
+      const payload = {
+        message,
+        history,
+        email
+      };
+
+      // Include messageThreadId if provided (for follow-up messages)
+      if (messageThreadId) {
+        payload.messageThreadId = messageThreadId;
+      }
+
+      const response = await axios.post(`/_hcms/api/smartspace-proxy`, {
         action: 'chat',
-        payload: {
-          message,
-          history
-        }
+        payload
       });
       return response.data;
     } catch (error) {
       console.error("Error sending chat:", error);
       throw error;
     }
+  },
+
+  async getMessageStatus(messageThreadId) {
+    try {
+      const response = await axios.post(`/_hcms/api/smartspace-proxy`, {
+        action: 'getStatus',
+        payload: { messageThreadId }
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error getting message status:", error);
+      throw error;
+    }
   }
 };
+
