@@ -3,10 +3,12 @@
     "version": "1.0.0",
     "description": "Proxy function for Smartspace integration using Azure AD Auth",
     "main": "main.js",
+    "scripts": {
+        "build": "esbuild main.js --bundle --platform=node --target=node20 --outfile=main.bundle.js"
+    },
     "dependencies": {
         "@azure/identity": "^4.0.0",
-        "axios": "^1.6.0",
-        "request": "^2.88.2"
+        "axios": "^1.6.0"
     },
     "devDependencies": {
         "esbuild": "^0.27.2"

@@ -1,17 +1,14 @@
-import axios from 'axios';
+import axios from "axios";
 
-const API_BASE_URL = '/_hcms/api'; // HubSpot serverless base path
-// Adjust if you are testing locally without HubSpot proxy
-// const API_BASE_URL = 'http://localhost:3000/api'; 
+const API_BASE_URL = "/_hcms/api";
 
 export const smartspaceService = {
-
   async sendChat(message, history = [], email = null, messageThreadId = null) {
     try {
       const payload = {
         message,
         history,
-        email
+        email,
       };
 
       // Include messageThreadId if provided (for follow-up messages)
@@ -19,28 +16,43 @@ export const smartspaceService = {
         payload.messageThreadId = messageThreadId;
       }
 
-      const response = await axios.post(`/_hcms/api/smartspace-proxy`, {
-        action: 'chat',
-        payload
+      console.log("[Service] Sending chat request:", payload);
+
+      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
+        action: "chat",
+        payload,
       });
+
+      console.log("[Service] Chat response:", response.data);
+
       return response.data;
     } catch (error) {
-      console.error("Error sending chat:", error);
+      console.error("[Service] Error sending chat:", error);
       throw error;
     }
   },
 
-  async getMessageStatus(messageThreadId) {
+  async getMessageStatus(messageThreadId, sentTime, lastMessageId = null) {
     try {
-      const response = await axios.post(`/_hcms/api/smartspace-proxy`, {
-        action: 'getStatus',
-        payload: { messageThreadId }
+      const payload = {
+        messageThreadId,
+        lastUserMessageTime: sentTime,
+      };
+
+      // Include lastMessageId if provided to prevent duplicates
+      if (lastMessageId) {
+        payload.lastMessageId = lastMessageId;
+      }
+
+      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
+        action: "getStatus",
+        payload,
       });
+
       return response.data;
     } catch (error) {
-      console.error("Error getting message status:", error);
+      console.error("[Service] Error getting message status:", error);
       throw error;
     }
-  }
+  },
 };
-
