@@ -1,16 +1,24 @@
 .card {
   max-width: 100vw;
   text-align: center;
-  margin: 5vw 0;
+  margin: -3vh 0 0 0;
   display: block !important;
   clear: both !important;
+}
+
+.title-underline {
+  width: 160px;
+  height: 8px;
+  background-color: #ff9933; /* Adjust the orange color to match your brand */
+  margin: 0 auto 0 auto; /* Centers the line and adds bottom spacing */
+  border-radius: 2px; /* Optional: slightly rounds the edges */
 }
 
 .chat-widget-container {
   display: block !important;
   width: 60% !important; 
   max-width: 1280px !important;
-  margin: 5vw auto 100px auto !important; 
+  margin: 2.5vw auto 100px auto !important; 
   clear: both !important;
   float: none !important;
   position: relative !important;
@@ -18,7 +26,7 @@
 
 .chat-window {
   width: 100% !important;
-  height: 500px !important;
+  height: 800px !important;
   background: #ffffff !important;
   border: 1px solid #ddd !important;
   border-radius: 10px !important;
@@ -29,7 +37,7 @@
 }
 
 .chat-header {
-  background: #007bff !important;
+  background: #0083CA !important;
   color: white !important;
   padding: 12px !important;
   text-align: center !important;
@@ -76,7 +84,7 @@
 }
 
 .send-btn {
-  background-color: #007bff !important;
+  background-color: #0083CA !important;
   color: #ffffff !important;
   border: none !important;
   width: 44px !important;
@@ -188,7 +196,7 @@
 }
 
 .chat-message.bot a {
-  color: #007bff !important;
+  color: #0083CA !important;
   text-decoration: none !important;
   font-size: inherit !important;
 }
@@ -198,7 +206,7 @@
 }
 
 .chat-message.bot blockquote {
-  border-left: 4px solid #007bff !important;
+  border-left: 4px solid #0083CA !important;
   padding-left: 12px !important;
   margin: 8px 0 !important;
   color: #555 !important;
