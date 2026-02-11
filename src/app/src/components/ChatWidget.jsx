@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import { smartspaceService } from "../services/smartspace";
 import "./ChatWidget.css";
 
-const ChatWidget = ({ email }) => {
+const ChatWidget = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -213,7 +213,6 @@ const ChatWidget = ({ email }) => {
       const response = await smartspaceService.sendChat(
         currentInput,
         [],
-        email,
         currentThreadId,
       );
 

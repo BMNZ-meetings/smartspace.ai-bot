@@ -3,12 +3,11 @@ import axios from "axios";
 const API_BASE_URL = "/_hcms/api";
 
 export const smartspaceService = {
-  async sendChat(message, history = [], email = null, messageThreadId = null) {
+  async sendChat(message, history = [], messageThreadId = null) {
     try {
       const payload = {
         message,
         history,
-        email,
       };
 
       // Include messageThreadId if provided (for follow-up messages)

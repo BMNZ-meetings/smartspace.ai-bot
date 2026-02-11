@@ -17,10 +17,10 @@ If you are developing a production application, we recommend using TypeScript wi
 
 ## Todo:
 
-- remove `const userEmail = window.currentUserEmail || null;` from App.jsx
-- Use HubSpot's context parameter in `main.js`
-- Validate `action` in `main.js`
-- Set max length message
-- Validate `messageThreadId` format
-- Remove logging from FE
-- Add rate limiting `main.js`
+- [x] remove `const userEmail = window.currentUserEmail || null;` from App.jsx
+- [x] Use HubSpot's context parameter in `main.js`
+- [ ] Validate `action` in `main.js`
+- [ ] Set max length message
+- [ ] Validate `messageThreadId` format
+- [ ] Remove logging from FE
+- [ ] Add rate limiting `main.js`

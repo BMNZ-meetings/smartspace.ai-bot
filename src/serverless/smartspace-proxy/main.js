@@ -42,6 +42,31 @@ exports.main = async (context, sendResponse) => {
   const { body } = context;
   const { action, payload } = body;
 
+  // Authenticate the calling user via HubSpot contact context
+  const contact = context.contact;
+  if (!contact) {
+    return sendResponse({
+      body: {
+        success: false,
+        error: "Unauthorized",
+        message: "You must be logged in to use this service.",
+      },
+      statusCode: 401,
+    });
+  }
+
+  const userEmail = contact.email;
+  if (!userEmail) {
+    return sendResponse({
+      body: {
+        success: false,
+        error: "Unauthorized",
+        message: "No email associated with your account.",
+      },
+      statusCode: 401,
+    });
+  }
+
   try {
     const token = await getAuthToken();
     const authHeader = {
@@ -54,7 +79,6 @@ exports.main = async (context, sendResponse) => {
     // ============================================
     if (action === "chat") {
       const chatMsg = payload.message || "Hello";
-      const userEmail = payload.email || "unknown@example.com";
       const threadId = payload.messageThreadId || null;
       const isFirstMessage = !threadId;
 
