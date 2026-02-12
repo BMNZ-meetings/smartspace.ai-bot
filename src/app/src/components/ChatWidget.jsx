@@ -300,7 +300,13 @@ const ChatWidget = () => {
               )}
             </div>
           ))}
-          {loading && <div className="loading">Typing...</div>}
+          {loading && (
+            <div className="loading">
+              <span className="dot"></span>
+              <span className="dot"></span>
+              <span className="dot"></span>
+            </div>
+          )}
         </div>
 
         <div className="chat-input-area">
