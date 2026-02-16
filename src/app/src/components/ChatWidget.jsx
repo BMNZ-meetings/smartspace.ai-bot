@@ -314,6 +314,7 @@ const ChatWidget = () => {
             type="text"
             value={input}
             disabled={loading}
+            maxLength={5000}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
             placeholder="Ask anything"

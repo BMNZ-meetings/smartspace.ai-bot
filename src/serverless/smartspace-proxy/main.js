@@ -38,9 +38,40 @@ async function getAuthToken() {
   return cachedToken;
 }
 
+const VALID_ACTIONS = ["chat", "getStatus"];
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_MESSAGE_LENGTH = 5000;
+const RATE_LIMIT_MAX = 20;
+const RATE_LIMIT_WINDOW_MS = 60000;
+const rateLimitMap = new Map();
+
+function isRateLimited(key) {
+  const now = Date.now();
+  const timestamps = rateLimitMap.get(key) || [];
+  const recent = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+
+  if (recent.length >= RATE_LIMIT_MAX) {
+    rateLimitMap.set(key, recent);
+    return true;
+  }
+
+  recent.push(now);
+  rateLimitMap.set(key, recent);
+  return false;
+}
+
 exports.main = async (context, sendResponse) => {
   const { body } = context;
   const { action, payload } = body;
+
+  // Validate action
+  if (!action || !VALID_ACTIONS.includes(action)) {
+    return sendResponse({
+      body: { success: false, error: "Invalid action" },
+      statusCode: 400,
+    });
+  }
 
   // Authenticate the calling user via HubSpot contact context
   const contact = context.contact;
@@ -78,8 +109,40 @@ exports.main = async (context, sendResponse) => {
     // ACTION: CHAT
     // ============================================
     if (action === "chat") {
+      // Rate limit chat messages per user
+      if (isRateLimited(userEmail)) {
+        return sendResponse({
+          body: {
+            success: false,
+            error: "Rate limit exceeded",
+            message: "Too many messages. Please wait a moment before trying again.",
+          },
+          statusCode: 429,
+        });
+      }
+
       const chatMsg = payload.message || "Hello";
       const threadId = payload.messageThreadId || null;
+
+      // Validate message length
+      if (chatMsg.length > MAX_MESSAGE_LENGTH) {
+        return sendResponse({
+          body: {
+            success: false,
+            error: "Message too long",
+            message: `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.`,
+          },
+          statusCode: 400,
+        });
+      }
+
+      // Validate messageThreadId format if provided
+      if (threadId && !UUID_REGEX.test(threadId)) {
+        return sendResponse({
+          body: { success: false, error: "Invalid messageThreadId format" },
+          statusCode: 400,
+        });
+      }
       const isFirstMessage = !threadId;
 
       const smartspacePayload = {
@@ -231,6 +294,14 @@ exports.main = async (context, sendResponse) => {
     if (action === "getStatus") {
       const { messageThreadId, lastUserMessageTime, lastMessageId } = payload;
 
+      // Validate messageThreadId format
+      if (!messageThreadId || !UUID_REGEX.test(messageThreadId)) {
+        return sendResponse({
+          body: { success: false, error: "Invalid messageThreadId format" },
+          statusCode: 400,
+        });
+      }
+
       console.log(
         `[STATUS] Checking thread ${messageThreadId}, last message time: ${lastUserMessageTime}`,
       );
@@ -357,11 +428,6 @@ exports.main = async (context, sendResponse) => {
       }
     }
 
-    // Unknown action
-    return sendResponse({
-      body: { error: "Unknown action", action },
-      statusCode: 400,
-    });
   } catch (error) {
     const errorData = error.response?.data || error.message;
     console.error("[PROXY] Error:", JSON.stringify(errorData, null, 2));

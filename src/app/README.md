@@ -19,8 +19,20 @@ If you are developing a production application, we recommend using TypeScript wi
 
 - [x] remove `const userEmail = window.currentUserEmail || null;` from App.jsx
 - [x] Use HubSpot's context parameter in `main.js`
-- [ ] Validate `action` in `main.js`
-- [ ] Set max length message
-- [ ] Validate `messageThreadId` format
+- [x] Validate `action` in `main.js`
+- [x] Set max length message
+- [x] Validate `messageThreadId` format
 - [ ] Remove logging from FE
-- [ ] Add rate limiting `main.js`
+- [x] Add rate limiting `main.js`
+
+### Security
+- [ ] Sanitize error responses in `main.js` — don't leak internal error details to client (lines 280, 439)
+- [ ] Validate `payload` exists in `main.js` before accessing properties (line 66)
+- [ ] Add periodic cleanup to `rateLimitMap` to prevent unbounded memory growth
+- [ ] Filter thread recovery lookup by user email to prevent cross-user thread leakage (line 227)
+- [ ] Remove unused `history` parameter from `smartspace.js` payload (or validate/cap its size)
+
+### Efficiency
+- [ ] Deduplicate concurrent token refresh requests in `main.js` `getAuthToken()`
+- [ ] Add polling cleanup on component unmount in `ChatWidget.jsx`
+- [ ] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
