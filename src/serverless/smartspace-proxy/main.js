@@ -169,7 +169,7 @@ exports.main = async (context, sendResponse) => {
           smartspacePayload,
           {
             headers: authHeader,
-            timeout: isFirstMessage ? 15000 : 10000, // Longer timeout for first message
+            timeout: isFirstMessage ? 7000 : 7000, // Must be under HubSpot's 10s execution limit
           },
         );
 
@@ -214,7 +214,7 @@ exports.main = async (context, sendResponse) => {
               `${SMARTSPACE_API_URL}/WorkSpaces/${SMARTSPACE_WORKSPACE_ID}/messageThreads?take=5`,
               {
                 headers: authHeader,
-                timeout: 5000,
+                timeout: 2000,
               },
             );
 

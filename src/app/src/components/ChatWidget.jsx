@@ -4,6 +4,67 @@ import remarkGfm from "remark-gfm";
 import { smartspaceService } from "../services/smartspace";
 import "./ChatWidget.css";
 
+function isDiagramLine(line) {
+  // Unicode box-drawing characters
+  if (/[┌┐└┘│─├┤┬┴┼╔╗╚╝║═]/.test(line)) return true;
+  // Unicode arrows as standalone lines
+  if (/^\s*[↓↑→←]\s*$/.test(line)) return true;
+  // ASCII standalone connectors: | or v
+  if (/^\s*[|]\s*$/.test(line)) return true;
+  if (/^\s*v\s*$/.test(line)) return true;
+  // ASCII box borders: +---- or ----+
+  if (/[+][-]{3,}|[-]{3,}[+]/.test(line)) return true;
+  // Separator lines: ====
+  if (/[=]{4,}/.test(line)) return true;
+  return false;
+}
+
+function preprocessMarkdown(text) {
+  const lines = text.split("\n");
+  const result = [];
+  let inCodeBlock = false;
+  let buffer = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (isDiagramLine(line)) {
+      if (!inCodeBlock) {
+        result.push("```");
+        inCodeBlock = true;
+      }
+      result.push(...buffer);
+      buffer = [];
+      result.push(line);
+    } else if (inCodeBlock) {
+      buffer.push(line);
+      // Look ahead: is there more diagram within the next 5 lines?
+      let moreDiagram = false;
+      for (let j = i + 1; j <= Math.min(lines.length - 1, i + 5); j++) {
+        if (isDiagramLine(lines[j])) {
+          moreDiagram = true;
+          break;
+        }
+      }
+      if (!moreDiagram) {
+        result.push("```");
+        inCodeBlock = false;
+        result.push(...buffer);
+        buffer = [];
+      }
+    } else {
+      result.push(line);
+    }
+  }
+
+  if (inCodeBlock) {
+    result.push("```");
+    result.push(...buffer);
+  }
+
+  return result.join("\n");
+}
+
 const ChatWidget = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -316,7 +377,7 @@ const ChatWidget = () => {
                       ),
                     }}
                   >
-                    {msg.text}
+                    {preprocessMarkdown(msg.text)}
                   </ReactMarkdown>
                 </div>
               ) : (
