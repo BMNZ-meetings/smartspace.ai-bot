@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { smartspaceService } from "../services/smartspace";
 import "./ChatWidget.css";
 
@@ -243,6 +244,14 @@ const ChatWidget = () => {
     } catch (err) {
       console.error("[Widget] Chat send error:", err);
 
+      // Handle rate limiting
+      if (err.response?.status === 429) {
+        botText =
+          err.response?.data?.message ||
+          "Too many messages. Please wait a moment before trying again.";
+        return;
+      }
+
       // Check if response contains a thread ID despite the error
       const responseThreadId = err.response?.data?.messageThreadId;
 
@@ -277,7 +286,7 @@ const ChatWidget = () => {
   /**
    * Handle Enter key press
    */
-  const handleKeyPress = (e) => {
+  const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -293,7 +302,22 @@ const ChatWidget = () => {
             <div key={idx} className={`chat-message ${msg.sender}`}>
               {msg.sender === "bot" ? (
                 <div style={{ textAlign: "left", width: "100%" }}>
-                  <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ href, children }) => (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {children}
+                        </a>
+                      ),
+                    }}
+                  >
+                    {msg.text}
+                  </ReactMarkdown>
                 </div>
               ) : (
                 msg.text
@@ -316,7 +340,7 @@ const ChatWidget = () => {
             disabled={loading}
             maxLength={5000}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKeyDown}
             placeholder="Ask anything"
           />
           <button

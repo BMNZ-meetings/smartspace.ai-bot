@@ -35,4 +35,14 @@ If you are developing a production application, we recommend using TypeScript wi
 ### Efficiency
 - [ ] Deduplicate concurrent token refresh requests in `main.js` `getAuthToken()`
 - [ ] Add polling cleanup on component unmount in `ChatWidget.jsx`
-- [ ] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
+- [x] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
+
+### Improvements (from Smartspace reference app review)
+- [x] Add `remarkGfm` to `ReactMarkdown` for tables, strikethrough, task lists
+- [x] Add `target="_blank"` + `rel="noopener noreferrer"` to markdown links
+- [x] Handle 429 rate limit response in `ChatWidget.jsx` with user-friendly message
+- [x] Add React `ErrorBoundary` around `ChatWidget` in `App.jsx`
+- [x] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
+- [ ] Investigate SSE streaming responses instead of polling — requires scoping whether HubSpot serverless functions can proxy an SSE stream
+- [ ] Consider React Query for state management — beneficial if expanding to multi-thread/sidebar UI, overkill for current single-widget scope
+- [ ] Add Zod schema validation on SmartSpace API responses — catches breaking API changes early, moderate effort to implement
