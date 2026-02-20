@@ -70,6 +70,8 @@ const ChatWidget = () => {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [messageThreadId, setMessageThreadId] = useState(null);
+  const [copiedIdx, setCopiedIdx] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState("idle"); // idle | online | error
 
   // Track the last bot message ID we've displayed
   const lastBotMessageId = useRef(null);
@@ -79,11 +81,15 @@ const ChatWidget = () => {
   const abortPolling = useRef(false);
 
   const chatBodyRef = useRef(null);
+  const inputRef = useRef(null);
 
-  // Auto-scroll to bottom
+  // Smooth auto-scroll to bottom
   useEffect(() => {
     if (chatBodyRef.current) {
-      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
+      chatBodyRef.current.scrollTo({
+        top: chatBodyRef.current.scrollHeight,
+        behavior: "smooth",
+      });
     }
   }, [messages, loading]);
 
@@ -257,6 +263,9 @@ const ChatWidget = () => {
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
 
     // Reset abort flag after a brief moment
     setTimeout(() => {
@@ -265,6 +274,7 @@ const ChatWidget = () => {
 
     let currentThreadId = messageThreadId;
     let botText = null;
+    let isError = false;
 
     try {
       console.log(
@@ -284,6 +294,8 @@ const ChatWidget = () => {
       if (response.success === false) {
         // Backend returned an error (first message timeout with no thread found)
         console.error("[Widget] Backend returned error:", response);
+        isError = true;
+        setConnectionStatus("error");
         botText =
           response.message ||
           "I'm having trouble connecting. Please try again.";
@@ -307,6 +319,8 @@ const ChatWidget = () => {
 
       // Handle rate limiting
       if (err.response?.status === 429) {
+        isError = true;
+        setConnectionStatus("error");
         botText =
           err.response?.data?.message ||
           "Too many messages. Please wait a moment before trying again.";
@@ -335,13 +349,45 @@ const ChatWidget = () => {
       }
     } finally {
       // Always show a response
+      if (!botText) {
+        isError = true;
+      }
+
+      setConnectionStatus(isError ? "error" : "online");
+
       const finalBotMsg =
         botText || "I'm having trouble connecting. Please try again later.";
 
-      setMessages((prev) => [...prev, { sender: "bot", text: finalBotMsg }]);
+      setMessages((prev) => [
+        ...prev,
+        { sender: "bot", text: finalBotMsg, isError },
+      ]);
       setLoading(false);
       isSending.current = false;
     }
+  };
+
+  /**
+   * Copy bot message text to clipboard
+   */
+  const copyToClipboard = async (text, idx) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx(null), 1500);
+    } catch (err) {
+      console.error("[Widget] Copy failed:", err);
+    }
+  };
+
+  /**
+   * Auto-grow textarea as user types
+   */
+  const handleInputChange = (e) => {
+    setInput(e.target.value);
+    const el = e.target;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
   /**
@@ -356,12 +402,27 @@ const ChatWidget = () => {
 
   return (
     <div className="chat-widget-container always-open">
-      <div className="chat-window">
-        <div className="chat-header"></div>
-        <div className="chat-body" ref={chatBodyRef}>
+      <div className={`chat-window${messages.length > 0 || loading ? ' chat-expanded' : ''}`}>
+        <div className="chat-header"><span className={`status-dot ${connectionStatus}`}></span></div>
+        <div className="chat-body" ref={chatBodyRef} role="log" aria-live="polite">
           {messages.map((msg, idx) => (
-            <div key={idx} className={`chat-message ${msg.sender}`}>
+            <div key={idx} className={`chat-message ${msg.sender}${msg.isError ? ' error' : ''}`}>
               {msg.sender === "bot" ? (
+                <>
+                <button
+                  className={`copy-btn${copiedIdx === idx ? ' copied' : ''}`}
+                  onClick={() => copyToClipboard(msg.text, idx)}
+                  aria-label="Copy message"
+                >
+                  {copiedIdx === idx ? (
+                    "✓"
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                  )}
+                </button>
                 <div style={{ textAlign: "left", width: "100%" }}>
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -380,6 +441,7 @@ const ChatWidget = () => {
                     {preprocessMarkdown(msg.text)}
                   </ReactMarkdown>
                 </div>
+                </>
               ) : (
                 msg.text
               )}
@@ -395,19 +457,23 @@ const ChatWidget = () => {
         </div>
 
         <div className="chat-input-area">
-          <input
-            type="text"
+          <textarea
+            ref={inputRef}
             value={input}
             disabled={loading}
             maxLength={5000}
-            onChange={(e) => setInput(e.target.value)}
+            rows={1}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             placeholder="Ask anything"
+            autoFocus
+            aria-label="Type your message"
           />
           <button
             className="send-btn"
             onClick={sendMessage}
             disabled={loading || !input.trim()}
+            aria-label="Send message"
           >
             ➤
           </button>
