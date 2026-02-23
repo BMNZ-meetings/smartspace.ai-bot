@@ -1,6 +1,7 @@
 import React from "react";
 import "./App.css";
 import ChatWidget from "./components/ChatWidget";
+import localLogo from "./assets/Digital Mentor 247 LOGO.png";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -29,9 +30,17 @@ class ErrorBoundary extends React.Component {
 }
 
 function App() {
+  const rootEl = document.getElementById("root");
+  const logoUrl = rootEl?.dataset?.logoUrl || localLogo;
+
   return (
     <>
       <div className="card">
+        <img
+          src={logoUrl}
+          alt="Digital Mentor 24/7"
+          className="card-logo"
+        />
         <h1>How can I help?</h1>
         <div className="title-underline"></div>
         <ErrorBoundary>

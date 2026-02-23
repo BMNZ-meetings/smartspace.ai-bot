@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Logo asset (hosted on HubSpot CMS, local copy for dev only)
+src/assets/Digital Mentor 247 LOGO.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
