@@ -15171,19 +15171,46 @@ exports.main = async (context, sendResponse) => {
               `[CHAT] Found ${threadsResponse.data.data?.length || 0} recent threads`
             );
             const now = (/* @__PURE__ */ new Date()).getTime();
-            const recentThread = threadsResponse.data.data?.find((thread) => {
-              const createdAt = new Date(thread.createdAt).getTime();
-              const ageSeconds = (now - createdAt) / 1e3;
-              return ageSeconds < 30;
-            });
-            if (recentThread) {
+            const recentThreads = (threadsResponse.data.data || []).filter(
+              (thread) => {
+                const createdAt = new Date(thread.createdAt).getTime();
+                const ageSeconds = (now - createdAt) / 1e3;
+                return ageSeconds < 30;
+              }
+            );
+            let ownedThread = null;
+            for (const candidate of recentThreads) {
+              try {
+                const threadMsgs = await axios.get(
+                  `${SMARTSPACE_API_URL}/messagethreads/${candidate.id}/messages?take=1&skip=0`,
+                  { headers: authHeader, timeout: 2e3 }
+                );
+                const firstMsg = threadMsgs.data.data?.[0];
+                const threadEmail = firstMsg?.values?.find(
+                  (v) => v.name === "email" && v.type === "Input"
+                )?.value;
+                if (threadEmail === userEmail) {
+                  ownedThread = candidate;
+                  break;
+                }
+                console.warn(
+                  `[CHAT] Thread ${candidate.id} belongs to a different user \u2014 skipping`
+                );
+              } catch (verifyError) {
+                console.warn(
+                  `[CHAT] Could not verify thread ${candidate.id}:`,
+                  verifyError.message
+                );
+              }
+            }
+            if (ownedThread) {
               console.log(
-                `[CHAT] Found recent thread: ${recentThread.id}, polling will handle response`
+                `[CHAT] Found verified thread: ${ownedThread.id}`
               );
               return sendResponse({
                 body: {
                   success: true,
-                  messageThreadId: recentThread.id,
+                  messageThreadId: ownedThread.id,
                   status: "timeout_with_thread",
                   message: "Message was sent but response is pending",
                   timestamp: (/* @__PURE__ */ new Date()).toISOString()
