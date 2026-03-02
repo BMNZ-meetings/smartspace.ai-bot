@@ -1,8 +1,15 @@
+/* Override Vite default #root styles */
+#root {
+  padding: 0 !important;
+  margin: 0 auto !important;
+  max-width: 100% !important;
+}
+
 .card {
   max-width: 100vw;
   text-align: center;
-  margin: -3vh 0 0 0;
-  padding: 2vh 0 0 0 !important;
+  margin: 5vh 0 5vh 0 !important;
+  padding: 0 !important;
   display: flex !important;
   flex-direction: column !important;
   clear: both !important;
@@ -34,16 +41,13 @@
 }
 
 .chat-widget-container {
-  display: flex !important;
-  flex-direction: column !important;
+  display: block !important;
   width: 60% !important;
   max-width: 1280px !important;
-  margin: 2.5vw auto 0 auto !important;
+  margin: 10px auto 0 auto !important;
   clear: both !important;
   float: none !important;
   position: relative !important;
-  flex: 1 !important;
-  min-height: 0 !important;
 }
 
 .chat-window {
@@ -55,7 +59,7 @@
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden !important;
-  height: 150px !important;
+  height: 120px !important;
   transition: height 0.4s ease-out !important;
 }
 
@@ -419,8 +423,7 @@
 
 /* Expanded state - fill remaining space within the card */
 .chat-window.chat-expanded {
-  flex: 1 !important;
-  height: auto !important;
+  height: calc(80vh - 250px) !important;
 }
 
 .chat-window.chat-expanded .chat-body {

@@ -82,6 +82,22 @@ const ChatWidget = () => {
 
   const chatBodyRef = useRef(null);
   const inputRef = useRef(null);
+  const containerRef = useRef(null);
+  const hasScrolledIntoView = useRef(false);
+
+  // Scroll the chat widget into view when it first expands
+  useEffect(() => {
+    if ((messages.length > 0 || loading) && !hasScrolledIntoView.current) {
+      hasScrolledIntoView.current = true;
+      // Wait for the CSS height transition to start
+      setTimeout(() => {
+        containerRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      }, 100);
+    }
+  }, [messages, loading]);
 
   // Smooth auto-scroll to bottom
   useEffect(() => {
@@ -401,7 +417,7 @@ const ChatWidget = () => {
   };
 
   return (
-    <div className="chat-widget-container always-open">
+    <div className="chat-widget-container always-open" ref={containerRef}>
       <div className={`chat-window${messages.length > 0 || loading ? ' chat-expanded' : ''}`}>
         <div className="chat-header"><span className={`status-dot ${connectionStatus}`}></span></div>
         <div className="chat-body" ref={chatBodyRef} role="log" aria-live="polite">
