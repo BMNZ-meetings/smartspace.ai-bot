@@ -72,6 +72,7 @@ const ChatWidget = () => {
   const [messageThreadId, setMessageThreadId] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("idle"); // idle | online | error
+  const [showToast, setShowToast] = useState(false);
 
   // Track the last bot message ID we've displayed
   const lastBotMessageId = useRef(null);
@@ -397,6 +398,42 @@ const ChatWidget = () => {
   };
 
   /**
+   * Format all messages as plain text
+   */
+  const formatConversation = () => {
+    return messages.map(msg => {
+      const sender = msg.sender === 'user' ? 'You' : 'Digital Mentor';
+      return `${sender}:\n${msg.text}`;
+    }).join('\n\n---\n\n');
+  };
+
+  /**
+   * Copy entire conversation to clipboard
+   */
+  const copyConversation = async () => {
+    try {
+      await navigator.clipboard.writeText(formatConversation());
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 1500);
+    } catch (err) {
+      console.error('[Widget] Copy conversation failed:', err);
+    }
+  };
+
+  /**
+   * Download conversation as a TXT file
+   */
+  const downloadConversation = () => {
+    const blob = new Blob([formatConversation()], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `digital-mentor-${new Date().toISOString().split('T')[0]}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /**
    * Auto-grow textarea as user types
    */
   const handleInputChange = (e) => {
@@ -419,7 +456,29 @@ const ChatWidget = () => {
   return (
     <div className="chat-widget-container always-open" ref={containerRef}>
       <div className={`chat-window${messages.length > 0 || loading ? ' chat-expanded' : ''}`}>
-        <div className="chat-header"><span className={`status-dot ${connectionStatus}`}></span></div>
+        <div className="chat-header">
+          <div className="chat-header-left">
+            <span className={`status-dot ${connectionStatus}`}></span>
+          </div>
+          {messages.length > 0 && (
+            <div className="chat-header-actions">
+              <button className="chat-header-btn" onClick={copyConversation} aria-label="Copy conversation">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+              <button className="chat-header-btn" onClick={downloadConversation} aria-label="Download conversation">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+              </button>
+            </div>
+          )}
+          {showToast && <div className="chat-toast">Copied to clipboard</div>}
+        </div>
         <div className="chat-body" ref={chatBodyRef} role="log" aria-live="polite">
           {messages.map((msg, idx) => (
             <div key={idx} className={`chat-message ${msg.sender}${msg.isError ? ' error' : ''}`}>

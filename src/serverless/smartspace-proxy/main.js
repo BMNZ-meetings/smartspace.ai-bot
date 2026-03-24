@@ -38,6 +38,48 @@ async function getAuthToken() {
   return cachedToken;
 }
 
+const HUBSPOT_TOKEN = process.env.private_token;
+
+async function storeThreadId(email, threadId) {
+  try {
+    const searchRes = await axios.post(
+      'https://api.hubapi.com/crm/v3/objects/contacts/search',
+      {
+        filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: email }] }],
+        properties: ['smartspace_thread_ids']
+      },
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+    );
+
+    const contact = searchRes.data.results?.[0];
+    if (!contact) {
+      console.warn(`[THREAD-STORE] No contact found for ${email}`);
+      return;
+    }
+
+    let threadIds = [];
+    try {
+      threadIds = JSON.parse(contact.properties.smartspace_thread_ids || '[]');
+    } catch (e) {
+      threadIds = [];
+    }
+
+    if (!threadIds.includes(threadId)) {
+      threadIds.push(threadId);
+    }
+
+    await axios.patch(
+      `https://api.hubapi.com/crm/v3/objects/contacts/${contact.id}`,
+      { properties: { smartspace_thread_ids: JSON.stringify(threadIds) } },
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+    );
+
+    console.log(`[THREAD-STORE] Stored thread ${threadId} for ${email} (total: ${threadIds.length})`);
+  } catch (err) {
+    console.error(`[THREAD-STORE] Failed to store thread for ${email}:`, err.message);
+  }
+}
+
 const VALID_ACTIONS = ["chat", "getStatus"];
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -181,6 +223,11 @@ exports.main = async (context, sendResponse) => {
         // Extract the messageThreadId from response
         const responseThreadId = apiResponse.data.messageThreadId || threadId;
 
+        // Store thread ID against HubSpot contact (fire-and-forget)
+        if (isFirstMessage && responseThreadId) {
+          storeThreadId(userEmail, responseThreadId);
+        }
+
         return sendResponse({
           body: {
             success: true,
@@ -206,7 +253,6 @@ exports.main = async (context, sendResponse) => {
           console.log(
             "[CHAT] First message timed out - trying to find the created thread",
           );
-
           // The message was likely queued even though we timed out
           // Try to find the thread that was created
           try {
@@ -265,6 +311,8 @@ exports.main = async (context, sendResponse) => {
               console.log(
                 `[CHAT] Found verified thread: ${ownedThread.id}`,
               );
+              // Store thread ID against HubSpot contact (fire-and-forget)
+              storeThreadId(userEmail, ownedThread.id);
               return sendResponse({
                 body: {
                   success: true,

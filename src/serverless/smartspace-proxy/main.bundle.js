@@ -15022,6 +15022,41 @@ async function getAuthToken() {
   }
   return cachedToken;
 }
+var HUBSPOT_TOKEN = process.env.private_token;
+async function storeThreadId(email, threadId) {
+  try {
+    const searchRes = await axios.post(
+      "https://api.hubapi.com/crm/v3/objects/contacts/search",
+      {
+        filterGroups: [{ filters: [{ propertyName: "email", operator: "EQ", value: email }] }],
+        properties: ["smartspace_thread_ids"]
+      },
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 5e3 }
+    );
+    const contact = searchRes.data.results?.[0];
+    if (!contact) {
+      console.warn(`[THREAD-STORE] No contact found for ${email}`);
+      return;
+    }
+    let threadIds = [];
+    try {
+      threadIds = JSON.parse(contact.properties.smartspace_thread_ids || "[]");
+    } catch (e) {
+      threadIds = [];
+    }
+    if (!threadIds.includes(threadId)) {
+      threadIds.push(threadId);
+    }
+    await axios.patch(
+      `https://api.hubapi.com/crm/v3/objects/contacts/${contact.id}`,
+      { properties: { smartspace_thread_ids: JSON.stringify(threadIds) } },
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 5e3 }
+    );
+    console.log(`[THREAD-STORE] Stored thread ${threadId} for ${email} (total: ${threadIds.length})`);
+  } catch (err) {
+    console.error(`[THREAD-STORE] Failed to store thread for ${email}:`, err.message);
+  }
+}
 var VALID_ACTIONS = ["chat", "getStatus"];
 var UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var MAX_MESSAGE_LENGTH = 5e3;
@@ -15136,6 +15171,9 @@ exports.main = async (context, sendResponse) => {
           JSON.stringify(apiResponse.data, null, 2)
         );
         const responseThreadId = apiResponse.data.messageThreadId || threadId;
+        if (isFirstMessage && responseThreadId) {
+          storeThreadId(userEmail, responseThreadId);
+        }
         return sendResponse({
           body: {
             success: true,
@@ -15207,6 +15245,7 @@ exports.main = async (context, sendResponse) => {
               console.log(
                 `[CHAT] Found verified thread: ${ownedThread.id}`
               );
+              storeThreadId(userEmail, ownedThread.id);
               return sendResponse({
                 body: {
                   success: true,
