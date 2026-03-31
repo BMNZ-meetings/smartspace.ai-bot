@@ -8,17 +8,25 @@
 .card {
   max-width: 100vw;
   text-align: center;
-  margin: 5vh 0 5vh 0 !important;
+  margin: 2vh 0 2vh 0 !important;
   padding: 0 !important;
   display: flex !important;
   flex-direction: column !important;
   clear: both !important;
-  overflow: hidden !important;
+  overflow: visible !important;
 }
 
-/* Only take full height when chat is expanded */
-.card:has(.chat-expanded) {
-  min-height: 80vh !important;
+/* Push footer below the expanded chat widget */
+body:has(.chat-expanded) > .wrapper.footer-wrapper,
+body:has(.history-open) > .wrapper.footer-wrapper {
+  clear: both !important;
+  margin-top: 40px !important;
+}
+
+body:has(.chat-expanded) > .wrapper:not(.footer-wrapper),
+body:has(.history-open) > .wrapper:not(.footer-wrapper) {
+  min-height: calc(75vh + 200px) !important;
+  padding-bottom: 40px !important;
 }
 
 .card-logo {
@@ -60,7 +68,7 @@
   flex-direction: column !important;
   overflow: hidden !important;
   height: 120px !important;
-  transition: height 0.4s ease-out !important;
+  transition: height 0.2s ease-out !important;
 }
 
 .chat-header {
@@ -101,9 +109,14 @@
   transition: color 0.2s ease, background 0.2s ease !important;
 }
 
-.chat-header-btn:hover {
+.chat-header-btn:hover:not(:disabled) {
   color: #ffffff !important;
   background: rgba(255, 255, 255, 0.15) !important;
+}
+
+.chat-header-btn:disabled {
+  opacity: 0.3 !important;
+  cursor: default !important;
 }
 
 .chat-toast {
@@ -117,7 +130,7 @@
   font-size: 13px !important;
   font-weight: normal !important;
   z-index: 10 !important;
-  animation: toastFade 1.5s ease forwards !important;
+  animation: toastFade 2.5s ease forwards !important;
   pointer-events: none !important;
 }
 
@@ -321,9 +334,9 @@
 
 /* Specific markdown element styling */
 .chat-message.bot p {
-  margin: 0 0 8px 0 !important;
+  margin: 0 0 14px 0 !important;
   font-size: 16px !important;
-  line-height: 1.4 !important;
+  line-height: 1.5 !important;
 }
 
 .chat-message.bot p:last-child {
@@ -332,22 +345,23 @@
 
 .chat-message.bot ul {
   list-style-type: disc !important;
-  margin: 8px 0 !important;
-  padding-left: 20px !important;
+  margin: 10px 0 14px 0 !important;
+  padding-left: 22px !important;
   font-size: 16px !important;
 }
 
 .chat-message.bot ol {
   list-style-type: decimal !important;
-  margin: 8px 0 !important;
-  padding-left: 20px !important;
+  margin: 10px 0 14px 0 !important;
+  padding-left: 22px !important;
   font-size: 16px !important;
 }
 
 .chat-message.bot li {
   display: list-item !important;
-  margin: 4px 0 !important;
+  margin: 6px 0 !important;
   font-size: 16px !important;
+  line-height: 1.5 !important;
 }
 
 .chat-message.bot strong {
@@ -404,7 +418,7 @@
 .chat-message.bot h1,
 .chat-message.bot h2,
 .chat-message.bot h3 {
-  margin: 12px 0 8px 0 !important;
+  margin: 16px 0 10px 0 !important;
   text-align: left !important;
   line-height: 1.3 !important;
 }
@@ -474,11 +488,10 @@
   border-top: none !important;
 }
 
-/* Expanded state - fill remaining space within the card */
+/* Expanded state - fixed height container, content scrolls inside.
+   75vh gives generous reading space; logo/title scroll above, footer below. */
 .chat-window.chat-expanded {
-  height: auto !important;
-  max-height: 80vh !important;
-  min-height: 350px !important;
+  height: max(350px, 75vh) !important;
 }
 
 .chat-window.chat-expanded .chat-body {
@@ -512,13 +525,374 @@
   }
 }
 
+/* ============================================
+   HISTORY PANEL
+   ============================================ */
+
+/* Container shifts when history is open */
+.chat-widget-container.history-open {
+  display: flex !important;
+  flex-direction: row !important;
+  width: calc(60% + 280px) !important;
+  gap: 0 !important;
+}
+
+.chat-widget-container.history-open .chat-window {
+  flex: 1 !important;
+  height: max(350px, 75vh) !important;
+  transition: none !important;
+}
+
+.chat-widget-container.history-open .chat-window .chat-body {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.history-panel {
+  width: 280px !important;
+  min-width: 280px !important;
+  height: max(350px, 75vh) !important;
+  background: #f8f9fa !important;
+  border: 1px solid #ddd !important;
+  border-right: none !important;
+  border-radius: 10px 0 0 10px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.1) !important;
+  animation: historySlideIn 0.2s ease-out !important;
+}
+
+@keyframes historySlideIn {
+  from {
+    opacity: 0;
+    width: 0;
+    min-width: 0;
+  }
+  to {
+    opacity: 1;
+    width: 280px;
+    min-width: 280px;
+  }
+}
+
+.chat-widget-container.history-open .chat-window {
+  border-radius: 0 10px 10px 0 !important;
+}
+
+.history-panel-header {
+  background: #0083CA !important;
+  color: white !important;
+  padding: 12px 16px !important;
+  font-weight: bold !important;
+  font-size: 14px !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  height: 44px !important;
+  box-sizing: border-box !important;
+}
+
+.history-panel-title {
+  font-size: 14px !important;
+  font-weight: 600 !important;
+}
+
+.history-panel-close {
+  background: transparent !important;
+  border: none !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+  cursor: pointer !important;
+  width: 28px !important;
+  height: 28px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 4px !important;
+  padding: 0 !important;
+  transition: color 0.2s ease, background 0.2s ease !important;
+}
+
+.history-panel-close:hover {
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.15) !important;
+}
+
+.history-new-btn {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin: 12px 18px 8px 12px !important;
+  padding: 10px 14px !important;
+  background: #ffffff !important;
+  border: 1px dashed #ccc !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  font-size: 13px !important;
+  color: #555 !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
+}
+
+.history-new-btn:hover:not(:disabled) {
+  background: #f0f4f8 !important;
+  border-color: #0083CA !important;
+  color: #0083CA !important;
+}
+
+.history-new-btn:disabled {
+  opacity: 0.5 !important;
+  cursor: default !important;
+  color: #999 !important;
+}
+
+.history-list {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  padding: 4px 12px 12px 12px !important;
+}
+
+.history-loading,
+.history-empty {
+  padding: 20px 0 !important;
+  text-align: center !important;
+  color: #888 !important;
+  font-size: 13px !important;
+}
+
+.history-item {
+  padding: 12px !important;
+  margin-bottom: 6px !important;
+  background: #ffffff !important;
+  border: 1px solid #e8e8e8 !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
+}
+
+.history-item:hover {
+  background: #f0f4f8 !important;
+  border-color: #0083CA !important;
+}
+
+.history-item.active {
+  background: #e8f0fe !important;
+  border-color: #0083CA !important;
+}
+
+.history-item-prompt {
+  font-size: 13px !important;
+  color: #333 !important;
+  line-height: 1.4 !important;
+  text-align: left !important;
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+  word-break: break-word !important;
+}
+
+.history-item-meta {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-top: 8px !important;
+}
+
+.history-item-date {
+  font-size: 11px !important;
+  color: #999 !important;
+}
+
+.history-item-actions {
+  display: flex !important;
+  gap: 4px !important;
+  opacity: 0 !important;
+  transition: opacity 0.15s ease !important;
+}
+
+.history-item:hover .history-item-actions {
+  opacity: 1 !important;
+}
+
+/* Show action buttons on touch devices (no hover available) */
+@media (hover: none) {
+  .history-item .history-item-actions {
+    opacity: 1 !important;
+  }
+}
+
+.history-item-btn {
+  background: transparent !important;
+  border: none !important;
+  color: #999 !important;
+  cursor: pointer !important;
+  width: 24px !important;
+  height: 24px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 4px !important;
+  padding: 0 !important;
+  transition: color 0.15s ease, background 0.15s ease !important;
+}
+
+.history-item-btn:hover {
+  color: #0083CA !important;
+  background: rgba(0, 131, 202, 0.1) !important;
+}
+
+.history-item-btn.delete:hover {
+  color: #c0392b !important;
+  background: rgba(192, 57, 43, 0.1) !important;
+}
+
+/* Delete confirmation modal */
+.delete-modal-backdrop {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  background: rgba(0, 0, 0, 0.3) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 1000 !important;
+}
+
+.delete-modal {
+  background: #ffffff !important;
+  border-radius: 10px !important;
+  padding: 24px !important;
+  max-width: 320px !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2) !important;
+  animation: modalFadeIn 0.15s ease-out !important;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.delete-modal-text {
+  font-size: 14px !important;
+  color: #333 !important;
+  line-height: 1.5 !important;
+  margin: 0 0 20px 0 !important;
+  text-align: left !important;
+}
+
+.delete-modal-actions {
+  display: flex !important;
+  justify-content: flex-end !important;
+  gap: 10px !important;
+}
+
+.delete-modal-btn {
+  padding: 8px 18px !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  cursor: pointer !important;
+  border: none !important;
+  transition: background 0.15s ease !important;
+}
+
+.delete-modal-btn.cancel {
+  background: #f0f0f0 !important;
+  color: #555 !important;
+}
+
+.delete-modal-btn.cancel:hover {
+  background: #e0e0e0 !important;
+}
+
+.delete-modal-btn.confirm {
+  background: #c0392b !important;
+  color: #ffffff !important;
+}
+
+.delete-modal-btn.confirm:hover {
+  background: #a93226 !important;
+}
+
+.history-item-spinner {
+  font-size: 11px !important;
+  color: #999 !important;
+  letter-spacing: 2px !important;
+}
+
+/* History toggle button in header */
+.history-toggle {
+  margin-left: 8px !important;
+}
+
+.history-toggle.active {
+  color: rgba(255, 255, 255, 0.7) !important;
+  background: transparent !important;
+}
+
+/* Thread loading state */
+.thread-loading {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 40px 20px !important;
+  gap: 12px !important;
+}
+
+.thread-loading-text {
+  font-size: 13px !important;
+  color: #888 !important;
+}
+
+/* History panel scrollbar */
+.history-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: #d1d1d1;
+  border-radius: 3px;
+}
+
+.history-list::-webkit-scrollbar-thumb:hover {
+  background: #b1b1b1;
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
   .chat-widget-container {
     width: 90% !important;
     margin: 20px auto !important;
   }
-  
+
+  /* History panel overlays on small screens */
+  .chat-widget-container.history-open {
+    width: 90% !important;
+    position: relative !important;
+  }
+
+  .chat-widget-container.history-open .history-panel {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    z-index: 20 !important;
+    border-radius: 10px !important;
+    border-right: 1px solid #ddd !important;
+    box-shadow: 4px 0 15px rgba(0,0,0,0.15) !important;
+  }
+
+  .chat-widget-container.history-open .chat-window {
+    border-radius: 10px !important;
+  }
+
   .chat-message {
     max-width: 90% !important;
   }

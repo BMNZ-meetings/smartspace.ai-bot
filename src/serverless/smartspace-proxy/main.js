@@ -40,7 +40,17 @@ async function getAuthToken() {
 
 const HUBSPOT_TOKEN = process.env.private_token;
 
+// Allowlist of emails that get thread IDs stored
+const THREAD_STORE_EMAILS = [
+  "rbraamburg@bacpartners.com.au",
+  "katrina@bmnz.org.nz",
+  "colin@bmnz.org.nz",
+];
+
 async function storeThreadId(email, threadId) {
+  if (!THREAD_STORE_EMAILS.includes(email.toLowerCase())) {
+    return;
+  }
   try {
     const searchRes = await axios.post(
       'https://api.hubapi.com/crm/v3/objects/contacts/search',
@@ -68,6 +78,11 @@ async function storeThreadId(email, threadId) {
       threadIds.push(threadId);
     }
 
+    // Cap at 500 most recent to stay within HubSpot property limits (~19,500 chars vs 65,536 limit)
+    if (threadIds.length > 500) {
+      threadIds = threadIds.slice(-500);
+    }
+
     await axios.patch(
       `https://api.hubapi.com/crm/v3/objects/contacts/${contact.id}`,
       { properties: { smartspace_thread_ids: JSON.stringify(threadIds) } },
@@ -80,7 +95,7 @@ async function storeThreadId(email, threadId) {
   }
 }
 
-const VALID_ACTIONS = ["chat", "getStatus"];
+const VALID_ACTIONS = ["chat", "getStatus", "getHistory", "getThread", "deleteThread"];
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_MESSAGE_LENGTH = 5000;
@@ -100,6 +115,15 @@ function isRateLimited(key) {
 
   recent.push(now);
   rateLimitMap.set(key, recent);
+
+  // Prune stale keys every 100 checks to prevent unbounded growth
+  if (rateLimitMap.size > 50) {
+    for (const [k, v] of rateLimitMap) {
+      const active = v.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+      if (active.length === 0) rateLimitMap.delete(k);
+    }
+  }
+
   return false;
 }
 
@@ -200,10 +224,7 @@ exports.main = async (context, sendResponse) => {
         smartspacePayload.messageThreadId = threadId;
       }
 
-      console.log(
-        `[CHAT] Sending to SmartSpace (first=${isFirstMessage}):`,
-        JSON.stringify(smartspacePayload, null, 2),
-      );
+      console.log(`[CHAT] Sending (first=${isFirstMessage}, thread=${threadId || 'new'})`);
 
       try {
         const apiResponse = await axios.post(
@@ -211,17 +232,12 @@ exports.main = async (context, sendResponse) => {
           smartspacePayload,
           {
             headers: authHeader,
-            timeout: isFirstMessage ? 7000 : 7000, // Must be under HubSpot's 10s execution limit
+            timeout: 7000, // Must be under HubSpot's 10s execution limit
           },
         );
 
-        console.log(
-          `[CHAT] SmartSpace Response:`,
-          JSON.stringify(apiResponse.data, null, 2),
-        );
-
-        // Extract the messageThreadId from response
         const responseThreadId = apiResponse.data.messageThreadId || threadId;
+        console.log(`[CHAT] Response received (thread=${responseThreadId})`);
 
         // Store thread ID against HubSpot contact (fire-and-forget)
         if (isFirstMessage && responseThreadId) {
@@ -503,6 +519,311 @@ exports.main = async (context, sendResponse) => {
             error: statusError.message,
           },
           statusCode: 200,
+        });
+      }
+    }
+
+    // ============================================
+    // ACTION: GET HISTORY
+    // ============================================
+    if (action === "getHistory") {
+      console.log(`[HISTORY] Fetching thread history for ${userEmail}`);
+
+      try {
+        // Fetch thread IDs from HubSpot contact
+        const searchRes = await axios.post(
+          'https://api.hubapi.com/crm/v3/objects/contacts/search',
+          {
+            filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: userEmail }] }],
+            properties: ['smartspace_thread_ids']
+          },
+          { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+        );
+
+        const hsContact = searchRes.data.results?.[0];
+        if (!hsContact) {
+          return sendResponse({
+            body: { success: true, threads: [] },
+            statusCode: 200,
+          });
+        }
+
+        let threadIds = [];
+        try {
+          threadIds = JSON.parse(hsContact.properties.smartspace_thread_ids || '[]');
+        } catch (e) {
+          threadIds = [];
+        }
+
+        if (threadIds.length === 0) {
+          return sendResponse({
+            body: { success: true, threads: [] },
+            statusCode: 200,
+          });
+        }
+
+        // Fetch first message from each thread (in parallel, max 20)
+        const threadSummaries = [];
+        const batch = threadIds.slice(-20).reverse(); // Most recent first, cap at 20
+
+        const results = await Promise.allSettled(
+          batch.map(async (tid) => {
+            // Validate UUID format before calling SmartSpace
+            if (!UUID_REGEX.test(tid)) {
+              console.warn(`[HISTORY] Skipping invalid thread ID: ${tid}`);
+              return null;
+            }
+
+            // Fetch the most recent message (API returns newest first)
+            // Email input is on every message, so newest is valid for ownership check
+            // We also need the oldest for the first prompt, so fetch both ends
+            const msgRes = await axios.get(
+              `${SMARTSPACE_API_URL}/messagethreads/${tid}/messages?take=1&skip=0`,
+              { headers: authHeader, timeout: 5000 }
+            );
+
+            const newestMsg = msgRes.data.data?.[0];
+            if (!newestMsg) return null;
+
+            // Verify email ownership on the newest message
+            const threadEmail = newestMsg.values?.find(
+              (v) => v.name === "email" && v.type === "Input"
+            )?.value;
+
+            if (threadEmail?.toLowerCase() !== userEmail.toLowerCase()) {
+              console.warn(`[HISTORY] Thread ${tid} email mismatch: ${threadEmail} !== ${userEmail}`);
+              return null;
+            }
+
+            // For the first prompt: if this is the only message, use it; otherwise fetch the oldest
+            const total = msgRes.data.total || 1;
+            let promptMsg = newestMsg;
+            if (total > 1) {
+              try {
+                const oldestRes = await axios.get(
+                  `${SMARTSPACE_API_URL}/messagethreads/${tid}/messages?take=1&skip=${total - 1}`,
+                  { headers: authHeader, timeout: 3000 }
+                );
+                promptMsg = oldestRes.data.data?.[0] || newestMsg;
+              } catch {
+                // Fall back to newest message prompt if oldest fetch fails
+              }
+            }
+
+            // Extract first prompt
+            const promptVal = promptMsg.values?.find(
+              (v) => v.name === "prompt" && v.type === "Input"
+            )?.value;
+
+            let promptText = "";
+            if (Array.isArray(promptVal)) {
+              promptText = promptVal[0]?.text || JSON.stringify(promptVal);
+            } else {
+              promptText = String(promptVal || "");
+            }
+
+            return {
+              threadId: tid,
+              firstPrompt: promptText.substring(0, 120),
+              date: promptMsg.createdAt,
+            };
+          })
+        );
+
+        for (const result of results) {
+          if (result.status === "fulfilled" && result.value) {
+            threadSummaries.push(result.value);
+          }
+        }
+
+        console.log(`[HISTORY] Returning ${threadSummaries.length} threads for ${userEmail}`);
+
+        return sendResponse({
+          body: { success: true, threads: threadSummaries },
+          statusCode: 200,
+        });
+      } catch (historyError) {
+        console.error("[HISTORY] Error:", historyError.message);
+        return sendResponse({
+          body: { success: true, threads: [], error: historyError.message },
+          statusCode: 200,
+        });
+      }
+    }
+
+    // ============================================
+    // ACTION: GET THREAD
+    // ============================================
+    if (action === "getThread") {
+      const { threadId } = payload;
+
+      if (!threadId || !UUID_REGEX.test(threadId)) {
+        return sendResponse({
+          body: { success: false, error: "Invalid threadId format" },
+          statusCode: 400,
+        });
+      }
+
+      console.log(`[THREAD] Fetching full thread ${threadId} for ${userEmail}`);
+
+      try {
+        const messagesRes = await axios.get(
+          `${SMARTSPACE_API_URL}/messagethreads/${threadId}/messages?take=100&skip=0`,
+          { headers: authHeader, timeout: 8000 }
+        );
+
+        const allMessages = messagesRes.data.data || [];
+
+        // Reject empty threads - no messages means no ownership to verify
+        if (allMessages.length === 0) {
+          return sendResponse({
+            body: { success: true, threadId, messages: [] },
+            statusCode: 200,
+          });
+        }
+
+        // Verify email ownership on the oldest message
+        {
+          const firstMsg = allMessages[allMessages.length - 1]; // Oldest message (API returns newest first)
+          const threadEmail = firstMsg.values?.find(
+            (v) => v.name === "email" && v.type === "Input"
+          )?.value;
+
+          if (threadEmail?.toLowerCase() !== userEmail.toLowerCase()) {
+            console.warn(`[THREAD] Access denied: thread ${threadId} belongs to ${threadEmail}, not ${userEmail}`);
+            return sendResponse({
+              body: { success: false, error: "Access denied" },
+              statusCode: 403,
+            });
+          }
+        }
+
+        // Parse messages into a clean format
+        const parsed = [];
+        for (const msg of allMessages.reverse()) { // Chronological order
+          const promptVal = msg.values?.find(
+            (v) => v.name === "prompt" && v.type === "Input"
+          )?.value;
+          const responseVal = msg.values?.find(
+            (v) => v.name === "Response" && (v.type === "Output" || String(v.type) === "2")
+          )?.value;
+
+          let promptText = "";
+          if (promptVal) {
+            if (Array.isArray(promptVal)) {
+              promptText = promptVal[0]?.text || JSON.stringify(promptVal);
+            } else {
+              promptText = String(promptVal);
+            }
+          }
+
+          let responseText = "";
+          if (responseVal) {
+            if (Array.isArray(responseVal)) {
+              const meaningful = responseVal.filter(
+                (s) => typeof s === "string" && s.trim().length > 20
+              );
+              responseText = meaningful.length > 0
+                ? meaningful[meaningful.length - 1]
+                : responseVal[0] || "";
+            } else {
+              responseText = String(responseVal);
+            }
+          }
+
+          if (promptText) {
+            parsed.push({ sender: "user", text: promptText.trim(), date: msg.createdAt });
+          }
+          if (responseText) {
+            parsed.push({ sender: "bot", text: responseText.trim(), date: msg.createdAt });
+          }
+        }
+
+        console.log(`[THREAD] Returning ${parsed.length} messages for thread ${threadId}`);
+
+        return sendResponse({
+          body: { success: true, threadId, messages: parsed },
+          statusCode: 200,
+        });
+      } catch (threadError) {
+        console.error("[THREAD] Error:", threadError.message);
+        return sendResponse({
+          body: { success: false, error: threadError.message },
+          statusCode: 500,
+        });
+      }
+    }
+
+    // ============================================
+    // ACTION: DELETE THREAD
+    // ============================================
+    if (action === "deleteThread") {
+      const { threadId } = payload;
+
+      if (!threadId || !UUID_REGEX.test(threadId)) {
+        return sendResponse({
+          body: { success: false, error: "Invalid threadId format" },
+          statusCode: 400,
+        });
+      }
+
+      console.log(`[DELETE] Removing thread ${threadId} for ${userEmail}`);
+
+      try {
+        // Fetch current thread IDs from HubSpot
+        const searchRes = await axios.post(
+          'https://api.hubapi.com/crm/v3/objects/contacts/search',
+          {
+            filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: userEmail }] }],
+            properties: ['smartspace_thread_ids']
+          },
+          { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+        );
+
+        const hsContact = searchRes.data.results?.[0];
+        if (!hsContact) {
+          return sendResponse({
+            body: { success: false, error: "Contact not found" },
+            statusCode: 404,
+          });
+        }
+
+        let threadIds = [];
+        try {
+          threadIds = JSON.parse(hsContact.properties.smartspace_thread_ids || '[]');
+        } catch (e) {
+          threadIds = [];
+        }
+
+        // Remove the thread ID
+        const updated = threadIds.filter(id => id !== threadId);
+
+        if (updated.length === threadIds.length) {
+          // Thread ID wasn't in the list - still return success
+          return sendResponse({
+            body: { success: true, threadId },
+            statusCode: 200,
+          });
+        }
+
+        // Patch back to HubSpot
+        await axios.patch(
+          `https://api.hubapi.com/crm/v3/objects/contacts/${hsContact.id}`,
+          { properties: { smartspace_thread_ids: JSON.stringify(updated) } },
+          { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+        );
+
+        console.log(`[DELETE] Removed thread ${threadId} for ${userEmail} (remaining: ${updated.length})`);
+
+        return sendResponse({
+          body: { success: true, threadId },
+          statusCode: 200,
+        });
+      } catch (deleteError) {
+        console.error("[DELETE] Error:", deleteError.message);
+        return sendResponse({
+          body: { success: false, error: deleteError.message },
+          statusCode: 500,
         });
       }
     }

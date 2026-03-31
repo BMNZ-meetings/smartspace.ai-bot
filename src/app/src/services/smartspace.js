@@ -15,19 +15,54 @@ export const smartspaceService = {
         payload.messageThreadId = messageThreadId;
       }
 
-      console.log("[Service] Sending chat request:", payload);
-
       const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
         action: "chat",
         payload,
       });
 
-      console.log("[Service] Chat response:", response.data);
-
       return response.data;
     } catch (error) {
       console.error("[Service] Error sending chat:", error);
       throw error;
+    }
+  },
+
+  async getHistory() {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
+        action: "getHistory",
+        payload: {},
+      });
+      return response.data;
+    } catch (error) {
+      console.error("[Service] Error fetching history:", error);
+      return { success: false, threads: [] };
+    }
+  },
+
+  async getThread(threadId) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
+        action: "getThread",
+        payload: { threadId },
+      });
+      return response.data;
+    } catch (error) {
+      console.error("[Service] Error fetching thread:", error);
+      throw error;
+    }
+  },
+
+  async deleteThread(threadId) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/smartspace-proxy`, {
+        action: "deleteThread",
+        payload: { threadId },
+      });
+      return response.data;
+    } catch (error) {
+      console.error("[Service] Error deleting thread:", error);
+      return { success: false };
     }
   },
 
