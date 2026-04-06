@@ -36,7 +36,7 @@ export const smartspaceService = {
       return response.data;
     } catch (error) {
       console.error("[Service] Error fetching history:", error);
-      return { success: false, threads: [] };
+      throw error;
     }
   },
 
@@ -62,7 +62,7 @@ export const smartspaceService = {
       return response.data;
     } catch (error) {
       console.error("[Service] Error deleting thread:", error);
-      return { success: false };
+      throw error;
     }
   },
 

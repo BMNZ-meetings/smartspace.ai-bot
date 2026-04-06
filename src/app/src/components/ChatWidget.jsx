@@ -65,15 +65,38 @@ function preprocessMarkdown(text) {
   return result.join("\n");
 }
 
+// Module-level constants - stable references for ReactMarkdown (avoids re-render thrashing)
+const REMARK_PLUGINS = [remarkGfm];
+const MARKDOWN_COMPONENTS = {
+  a: ({ href, children }) => {
+    const safeHref = href && /^https?:\/\//i.test(href) ? href : undefined;
+    return safeHref ? (
+      <a href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>
+    ) : (
+      <span>{children}</span>
+    );
+  },
+};
+
+// Polling constants
+const POLL_MAX_ATTEMPTS = 40;
+const POLL_INITIAL_DELAY_MS = 1500;
+const POLL_EXTENDED_DELAY_MS = 3000;
+const POLL_FAST_PHASE_COUNT = 5;
+const THREAD_CACHE_MAX = 20;
+
 const ChatWidget = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [pending, setPending] = useState(false); // true when waiting for any response (blocks new sends)
+  // NOTE: pending (state) and isSending (ref) both track send-lock.
+  // pending drives UI disabling; isSending prevents re-entry from rapid clicks.
+  const [pending, setPending] = useState(false);
   const [messageThreadId, setMessageThreadId] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("idle"); // idle | online | error
-  const [showToast, setShowToast] = useState(false);
+  const [toastMessage, setToastMessage] = useState(null);
+  const showToast = (msg) => { setToastMessage(msg); setTimeout(() => setToastMessage(null), 3000); };
 
   // History panel state - restore open preference from localStorage
   const [historyOpen, setHistoryOpen] = useState(() => {
@@ -81,12 +104,27 @@ const ChatWidget = () => {
   });
   const [historyThreads, setHistoryThreads] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [pollingHint, setPollingHint] = useState(null);
   const [historyAvailable, setHistoryAvailable] = useState(false);
   const [viewingThread, setViewingThread] = useState(null); // threadId of loaded history
   const [threadLoading, setThreadLoading] = useState(false);
+  const [historyActionLoading, setHistoryActionLoading] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
 
   // In-memory cache for loaded thread messages (cleared on page unload)
   const threadCache = useRef(new Map());
+  const cacheThread = (threadId, msgs) => {
+    threadCache.current.set(threadId, msgs);
+    if (threadCache.current.size > THREAD_CACHE_MAX) {
+      const oldest = threadCache.current.keys().next().value;
+      threadCache.current.delete(oldest);
+    }
+  };
+
+  // Unique ID counter for message keys (avoids index-based React keys)
+  const msgIdCounter = useRef(0);
+  const nextMsgId = () => ++msgIdCounter.current;
 
   // Track the last bot message ID we've displayed
   const lastBotMessageId = useRef(null);
@@ -99,23 +137,54 @@ const ChatWidget = () => {
   const chatBodyRef = useRef(null);
   const inputRef = useRef(null);
   const containerRef = useRef(null);
+  const deleteModalRef = useRef(null);
   const hasScrolledIntoView = useRef(false);
 
-  // Load history on mount
-  useEffect(() => {
-    const loadHistory = async () => {
-      setHistoryLoading(true);
+  // Load history, then prefetch the 3 most recent threads
+  const cancelledRef = useRef(false);
+  const loadHistory = async () => {
+    setHistoryLoading(true);
+    setHistoryError(false);
+    try {
       const result = await smartspaceService.getHistory();
       if (result.success && result.threads && result.threads.length > 0) {
         setHistoryThreads(result.threads);
         setHistoryAvailable(true);
+        setHistoryLoading(false);
+
+        // Prefetch the 3 most recent threads into cache (sequential is fine for 3)
+        const toPrefetch = result.threads.slice(0, 3);
+        for (const thread of toPrefetch) {
+          if (cancelledRef.current || threadCache.current.has(thread.threadId)) continue;
+          try {
+            const res = await smartspaceService.getThread(thread.threadId);
+            if (cancelledRef.current) break;
+            if (res.success && res.messages) {
+              cacheThread(thread.threadId, res.messages.map(m => ({
+                id: nextMsgId(),
+                sender: m.sender,
+                text: m.sender === "bot" ? preprocessMarkdown(m.text) : m.text,
+                isError: false,
+              })));
+            }
+          } catch { /* silent - user can still fetch on click */ }
+        }
       } else {
         // No threads - close panel even if localStorage said open
         setHistoryOpen(false);
+        try { localStorage.removeItem("dm_history_open"); } catch { /* ignore */ }
+        setHistoryLoading(false);
       }
+    } catch (err) {
+      console.error("[Widget] Failed to load history:", err);
+      setHistoryError(true);
       setHistoryLoading(false);
-    };
+    }
+  };
+
+  useEffect(() => {
     loadHistory();
+    return () => { cancelledRef.current = true; };
   }, []);
 
   /**
@@ -133,7 +202,12 @@ const ChatWidget = () => {
   const loadThread = async (threadId) => {
     // Claim a new generation - invalidates any in-flight operation
     const myGen = ++operationGen.current;
+    isSending.current = false;
+    setPending(false);
     setLoading(false);
+
+    // Lock input during thread load
+    setPending(true);
 
     // Check in-memory cache first
     const cached = threadCache.current.get(threadId);
@@ -143,6 +217,7 @@ const ChatWidget = () => {
       setViewingThread(threadId);
       lastBotMessageId.current = null;
       setConnectionStatus("online");
+      setPending(false);
       return;
     }
 
@@ -152,12 +227,13 @@ const ChatWidget = () => {
       const result = await smartspaceService.getThread(threadId);
 
       // Staleness check: user may have navigated away during the fetch
-      if (operationGen.current !== myGen) return;
+      if (operationGen.current !== myGen) { setPending(false); return; }
 
       if (result.success && result.messages) {
         const loadedMessages = result.messages.map(m => ({
+          id: nextMsgId(),
           sender: m.sender,
-          text: m.text,
+          text: m.sender === "bot" ? preprocessMarkdown(m.text) : m.text,
           isError: false,
         }));
         setMessages(loadedMessages);
@@ -176,34 +252,38 @@ const ChatWidget = () => {
           const botText = await pollForResponse(threadId, lastUserTime, myGen);
 
           // Staleness check after poll
-          if (operationGen.current !== myGen) return;
+          if (operationGen.current !== myGen) { setPending(false); return; }
 
           if (botText) {
-            const updated = [...loadedMessages, { sender: "bot", text: botText, isError: false }];
+            const updated = [...loadedMessages, { id: nextMsgId(), sender: "bot", text: preprocessMarkdown(botText), isError: false }];
             setMessages(updated);
-            threadCache.current.set(threadId, updated);
+            cacheThread(threadId, updated);
           } else {
             setMessages((prev) => [...prev, {
+              id: nextMsgId(),
               sender: "bot",
               text: "The response for this conversation is no longer available. Please start a new conversation.",
               isError: true,
             }]);
           }
           setLoading(false);
+          setPollingHint(null);
           setConnectionStatus(botText ? "online" : "error");
         } else {
           // Cache completed threads
-          threadCache.current.set(threadId, loadedMessages);
+          cacheThread(threadId, loadedMessages);
         }
+        setPending(false);
         return;
       }
     } catch (err) {
-      if (operationGen.current !== myGen) return;
+      if (operationGen.current !== myGen) { setPending(false); return; }
       console.error("[Widget] Failed to load thread:", err);
-      setMessages([{ sender: "bot", text: "Could not load this conversation. Please try again.", isError: true }]);
+      setMessages([{ id: nextMsgId(), sender: "bot", text: "Could not load this conversation. Please try again.", isError: true }]);
       setConnectionStatus("error");
     }
     setThreadLoading(false);
+    setPending(false);
   };
 
   /**
@@ -212,6 +292,8 @@ const ChatWidget = () => {
   const startNewConversation = () => {
     // Claim a new generation - invalidates any in-flight operation
     ++operationGen.current;
+    isSending.current = false;
+    setPending(false);
     setLoading(false);
 
     setMessages([]);
@@ -256,8 +338,8 @@ const ChatWidget = () => {
     // Fetch from API
     const result = await smartspaceService.getThread(threadId);
     if (result.success && result.messages) {
-      const parsed = result.messages.map(m => ({ sender: m.sender, text: m.text, isError: false }));
-      threadCache.current.set(threadId, parsed);
+      const parsed = result.messages.map(m => ({ id: nextMsgId(), sender: m.sender, text: m.text, isError: false }));
+      cacheThread(threadId, parsed);
       return parsed;
     }
     return null;
@@ -276,8 +358,6 @@ const ChatWidget = () => {
   /**
    * Copy a single thread's conversation to clipboard
    */
-  const [historyActionLoading, setHistoryActionLoading] = useState(null);
-
   const copyThread = async (threadId, e) => {
     e.stopPropagation();
     setHistoryActionLoading(threadId);
@@ -285,11 +365,11 @@ const ChatWidget = () => {
       const msgs = await getThreadMessages(threadId);
       if (msgs) {
         await navigator.clipboard.writeText(formatMessages(msgs));
-        setShowToast(true);
-        setTimeout(() => setShowToast(false), 2500);
+        showToast("Copied to clipboard");
       }
     } catch (err) {
       console.error("[Widget] Copy thread failed:", err);
+      showToast("Failed to copy conversation");
     }
     setHistoryActionLoading(null);
   };
@@ -314,6 +394,7 @@ const ChatWidget = () => {
       }
     } catch (err) {
       console.error("[Widget] Download thread failed:", err);
+      showToast("Failed to download conversation");
     }
     setHistoryActionLoading(null);
   };
@@ -321,8 +402,6 @@ const ChatWidget = () => {
   /**
    * Delete a thread - confirmation modal + HubSpot removal
    */
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // threadId pending confirmation
-
   const requestDeleteThread = (threadId, e) => {
     e.stopPropagation();
     setDeleteConfirm(threadId);
@@ -337,8 +416,12 @@ const ChatWidget = () => {
     try {
       const result = await smartspaceService.deleteThread(threadId);
       if (result.success) {
-        // Remove from history list
-        setHistoryThreads((prev) => prev.filter(t => t.threadId !== threadId));
+        // Remove from history list and hide icon if none remain
+        setHistoryThreads((prev) => {
+          const filtered = prev.filter(t => t.threadId !== threadId);
+          if (filtered.length === 0) setHistoryAvailable(false);
+          return filtered;
+        });
         // Remove from cache
         threadCache.current.delete(threadId);
         // If currently viewing this thread, clear the view
@@ -348,17 +431,32 @@ const ChatWidget = () => {
           setViewingThread(null);
           setConnectionStatus("idle");
         }
-        // If no threads left, hide the history icon
-        setHistoryThreads((prev) => {
-          if (prev.length === 0) setHistoryAvailable(false);
-          return prev;
-        });
       }
     } catch (err) {
       console.error("[Widget] Delete thread failed:", err);
+      showToast("Failed to delete conversation");
     }
     setHistoryActionLoading(null);
   };
+
+  // Focus trap and Escape handler for delete modal
+  useEffect(() => {
+    if (!deleteConfirm || !deleteModalRef.current) return;
+    const modal = deleteModalRef.current;
+    const focusable = modal.querySelectorAll("button");
+    if (focusable.length) focusable[0].focus();
+
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") { setDeleteConfirm(null); return; }
+      if (e.key !== "Tab" || !focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    modal.addEventListener("keydown", handleKeyDown);
+    return () => modal.removeEventListener("keydown", handleKeyDown);
+  }, [deleteConfirm]);
 
   // Scroll the chat widget into view when it expands or history opens
   useEffect(() => {
@@ -373,21 +471,28 @@ const ChatWidget = () => {
     }
   }, [messages, loading, historyOpen]);
 
-  // Re-centre when history panel toggles
+  // Re-centre when history panel toggles - scroll the card (parent) into view
   useEffect(() => {
     if (historyOpen) {
       setTimeout(() => {
-        containerRef.current?.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-        });
-      }, 250); // After panel animation
+        const card = containerRef.current?.closest(".card");
+        if (card) {
+          card.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 250);
     }
   }, [historyOpen]);
 
-  // Smooth auto-scroll to bottom
+  // Auto-scroll to bottom only when user is near the bottom
+  const isNearBottom = useRef(true);
+  const handleChatScroll = () => {
+    const el = chatBodyRef.current;
+    if (!el) return;
+    isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
+
   useEffect(() => {
-    if (chatBodyRef.current) {
+    if (chatBodyRef.current && isNearBottom.current) {
       chatBodyRef.current.scrollTo({
         top: chatBodyRef.current.scrollHeight,
         behavior: "smooth",
@@ -451,20 +556,25 @@ const ChatWidget = () => {
    * Poll for the bot's response
    * Stops early if a new message is sent or max attempts reached
    */
-  const pollForResponse = async (threadId, sentTime, gen, maxAttempts = 40) => {
+  const pollForResponse = async (threadId, sentTime, gen, maxAttempts = POLL_MAX_ATTEMPTS) => {
     console.log(`[Widget] Starting poll for thread ${threadId} (gen=${gen})`);
 
     for (let i = 0; i < maxAttempts; i++) {
       // Check if this operation has been superseded
       if (operationGen.current !== gen) {
         console.log(`[Widget] Poll aborted - gen ${gen} superseded by ${operationGen.current}`);
+        setPollingHint(null);
         return null;
       }
+
+      // Show progress hints during long polls
+      if (i === 10) setPollingHint("Still working on a response...");
+      if (i === 25) setPollingHint("Taking longer than usual. Please wait...");
 
       try {
         // Wait before polling (except first attempt)
         if (i > 0) {
-          const delay = i <= 5 ? 1500 : 3000;
+          const delay = i <= POLL_FAST_PHASE_COUNT ? POLL_INITIAL_DELAY_MS : POLL_EXTENDED_DELAY_MS;
           await new Promise((res) => setTimeout(res, delay));
         }
 
@@ -553,7 +663,7 @@ const ChatWidget = () => {
 
     const sentTime = new Date().toISOString();
     const currentInput = input.trim();
-    const userMessage = { sender: "user", text: currentInput };
+    const userMessage = { id: nextMsgId(), sender: "user", text: currentInput };
     const isFirstMessage = !messageThreadId;
 
     // Clear history view state if starting a new conversation
@@ -649,6 +759,7 @@ const ChatWidget = () => {
       if (operationGen.current !== myGen) {
         isSending.current = false;
         setPending(false);
+        setPollingHint(null);
         return;
       }
 
@@ -661,14 +772,21 @@ const ChatWidget = () => {
       const finalBotMsg =
         botText || "I'm having trouble connecting. Please try again later.";
 
-      setMessages((prev) => [...prev, { sender: "bot", text: finalBotMsg, isError }]);
+      setMessages((prev) => [...prev, {
+        id: nextMsgId(),
+        sender: "bot",
+        text: isError ? finalBotMsg : preprocessMarkdown(finalBotMsg),
+        isError,
+      }]);
 
-      // Cache separately to avoid capturing wrong thread's messages
+      // Invalidate cache so next history click re-fetches full thread.
+      // Active thread is in `messages` state, so the miss only costs one API call.
       if (currentThreadId && botText && !isError) {
         threadCache.current.delete(currentThreadId);
       }
 
       setLoading(false);
+      setPollingHint(null);
       isSending.current = false;
       setPending(false);
     }
@@ -687,26 +805,17 @@ const ChatWidget = () => {
     }
   };
 
-  /**
-   * Format all messages as plain text
-   */
-  const formatConversation = () => {
-    return messages.map(msg => {
-      const sender = msg.sender === 'user' ? 'You' : 'Digital Mentor';
-      return `${sender}:\n${msg.text}`;
-    }).join('\n\n---\n\n');
-  };
 
   /**
    * Copy entire conversation to clipboard
    */
   const copyConversation = async () => {
     try {
-      await navigator.clipboard.writeText(formatConversation());
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 2500);
+      await navigator.clipboard.writeText(formatMessages(messages));
+      showToast("Copied to clipboard");
     } catch (err) {
       console.error('[Widget] Copy conversation failed:', err);
+      showToast("Failed to copy conversation");
     }
   };
 
@@ -714,7 +823,7 @@ const ChatWidget = () => {
    * Download conversation as a TXT file
    */
   const downloadConversation = () => {
-    const blob = new Blob([formatConversation()], { type: 'text/plain' });
+    const blob = new Blob([formatMessages(messages)], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -765,6 +874,13 @@ const ChatWidget = () => {
           <div className="history-list">
             {historyLoading ? (
               <div className="history-loading">Loading...</div>
+            ) : historyError ? (
+              <div className="history-empty">
+                Failed to load history.
+                <button onClick={loadHistory} style={{ display: "block", marginTop: 8, cursor: "pointer", color: "#0083CA", background: "none", border: "none", textDecoration: "underline", padding: 0, fontSize: "inherit" }}>
+                  Try again
+                </button>
+              </div>
             ) : historyThreads.length === 0 ? (
               <div className="history-empty">No previous conversations</div>
             ) : (
@@ -773,6 +889,10 @@ const ChatWidget = () => {
                   key={thread.threadId}
                   className={`history-item${viewingThread === thread.threadId ? ' active' : ''}`}
                   onClick={() => loadThread(thread.threadId)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); loadThread(thread.threadId); } }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Load conversation: ${thread.firstPrompt}`}
                 >
                   <div className="history-item-prompt">{thread.firstPrompt}</div>
                   <div className="history-item-meta">
@@ -810,8 +930,8 @@ const ChatWidget = () => {
 
       {/* Delete confirmation modal */}
       {deleteConfirm && (
-        <div className="delete-modal-backdrop" onClick={() => setDeleteConfirm(null)}>
-          <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="delete-modal-backdrop" onClick={() => setDeleteConfirm(null)} onKeyDown={(e) => { if (e.key === "Escape") setDeleteConfirm(null); }}>
+          <div className="delete-modal" ref={deleteModalRef} onClick={(e) => e.stopPropagation()}>
             <p className="delete-modal-text">Remove this conversation from your history? This cannot be undone.</p>
             <div className="delete-modal-actions">
               <button className="delete-modal-btn cancel" onClick={() => setDeleteConfirm(null)}>Cancel</button>
@@ -859,9 +979,9 @@ const ChatWidget = () => {
               </>
             )}
           </div>
-          {showToast && <div className="chat-toast">Copied to clipboard</div>}
+          {toastMessage && <div className="chat-toast">{toastMessage}</div>}
         </div>
-        <div className="chat-body" ref={chatBodyRef} role="log" aria-live="polite">
+        <div className="chat-body" ref={chatBodyRef} onScroll={handleChatScroll} role="log">
           {threadLoading && (
             <div className="thread-loading">
               <div className="loading">
@@ -873,7 +993,7 @@ const ChatWidget = () => {
             </div>
           )}
           {messages.map((msg, idx) => (
-            <div key={idx} className={`chat-message ${msg.sender}${msg.isError ? ' error' : ''}`}>
+            <div key={msg.id} className={`chat-message ${msg.sender}${msg.isError ? ' error' : ''}`} {...(idx === messages.length - 1 ? { "aria-live": "polite" } : {})}>
               {msg.sender === "bot" ? (
                 <>
                 <button
@@ -892,20 +1012,10 @@ const ChatWidget = () => {
                 </button>
                 <div style={{ textAlign: "left", width: "100%" }}>
                   <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      a: ({ href, children }) => (
-                        <a
-                          href={href}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          {children}
-                        </a>
-                      ),
-                    }}
+                    remarkPlugins={REMARK_PLUGINS}
+                    components={MARKDOWN_COMPONENTS}
                   >
-                    {preprocessMarkdown(msg.text)}
+                    {msg.text}
                   </ReactMarkdown>
                 </div>
                 </>
@@ -915,11 +1025,14 @@ const ChatWidget = () => {
             </div>
           ))}
           {loading && (
-            <div className="loading">
-              <span className="dot"></span>
-              <span className="dot"></span>
-              <span className="dot"></span>
-            </div>
+            <>
+              <div className="loading">
+                <span className="dot"></span>
+                <span className="dot"></span>
+                <span className="dot"></span>
+              </div>
+              {pollingHint && <div className="thread-loading-text">{pollingHint}</div>}
+            </>
           )}
         </div>
 

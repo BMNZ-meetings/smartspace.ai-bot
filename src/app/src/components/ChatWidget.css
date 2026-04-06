@@ -5,28 +5,32 @@
   max-width: 100% !important;
 }
 
+/* Body flex layout: main content fills viewport, footer sits below.
+   Handles all three states: collapsed, expanded, collapsed-after-expanded. */
+body {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 100vh !important;
+}
+
+body > .wrapper:not(.footer-wrapper) {
+  flex: 1 !important;
+}
+
+body > .wrapper.footer-wrapper {
+  flex-shrink: 0 !important;
+}
+
 .card {
   max-width: 100vw;
   text-align: center;
-  margin: 2vh 0 2vh 0 !important;
+  margin: 1vh 0 1vh 0 !important;
   padding: 0 !important;
   display: flex !important;
   flex-direction: column !important;
   clear: both !important;
   overflow: visible !important;
-}
-
-/* Push footer below the expanded chat widget */
-body:has(.chat-expanded) > .wrapper.footer-wrapper,
-body:has(.history-open) > .wrapper.footer-wrapper {
-  clear: both !important;
-  margin-top: 40px !important;
-}
-
-body:has(.chat-expanded) > .wrapper:not(.footer-wrapper),
-body:has(.history-open) > .wrapper:not(.footer-wrapper) {
-  min-height: calc(75vh + 200px) !important;
-  padding-bottom: 40px !important;
+  scroll-margin-top: 20px !important;
 }
 
 .card-logo {
@@ -566,13 +570,11 @@ body:has(.history-open) > .wrapper:not(.footer-wrapper) {
 @keyframes historySlideIn {
   from {
     opacity: 0;
-    width: 0;
-    min-width: 0;
+    transform: translateX(-100%);
   }
   to {
     opacity: 1;
-    width: 280px;
-    min-width: 280px;
+    transform: translateX(0);
   }
 }
 

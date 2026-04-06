@@ -15026,7 +15026,12 @@ var HUBSPOT_TOKEN = process.env.private_token;
 var THREAD_STORE_EMAILS = [
   "rbraamburg@bacpartners.com.au",
   "katrina@bmnz.org.nz",
-  "colin@bmnz.org.nz"
+  "colin@bmnz.org.nz",
+  "june@bmnz.org.nz",
+  "david.altena@smartspace.ai",
+  "sarah@bmnz.org.nz",
+  "duriemk@gmail.com",
+  "justin@flitter.co.nz"
 ];
 async function storeThreadId(email, threadId) {
   if (!THREAD_STORE_EMAILS.includes(email.toLowerCase())) {

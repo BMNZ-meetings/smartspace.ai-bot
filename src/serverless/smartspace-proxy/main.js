@@ -2,6 +2,7 @@ const axios = require("axios");
 
 let cachedToken = null;
 let tokenExpiry = 0;
+let tokenPromise = null;
 
 const TENANT_ID = process.env.TENANT_ID;
 const CLIENT_ID = process.env.YOUR_APP_CLIENT_ID;
@@ -10,10 +11,17 @@ const SMARTSPACE_APP_ID = process.env.SMARTSPACE_API_APP_ID;
 const SMARTSPACE_WORKSPACE_ID = process.env.SMARTSPACE_WORKSPACE_ID;
 const SMARTSPACE_API_URL = process.env.SMARTSPACE_CHAT_API_URL;
 
-// Helper to get auth token
+// Helper to get auth token (promise singleton prevents thundering herd on expiry)
 async function getAuthToken() {
   const now = Date.now();
-  if (!cachedToken || now >= tokenExpiry - 120000) {
+  if (cachedToken && now < tokenExpiry - 120000) {
+    return cachedToken;
+  }
+  // If a fetch is already in flight, reuse its promise
+  if (tokenPromise) {
+    return tokenPromise;
+  }
+  tokenPromise = (async () => {
     try {
       const tokenResponse = await axios.post(
         `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
@@ -26,25 +34,34 @@ async function getAuthToken() {
         { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
       );
       cachedToken = tokenResponse.data.access_token;
-      tokenExpiry = now + tokenResponse.data.expires_in * 1000;
+      tokenExpiry = Date.now() + tokenResponse.data.expires_in * 1000;
+      return cachedToken;
     } catch (error) {
       console.error(
         "Token acquisition failed:",
         error.response?.data || error.message,
       );
       throw new Error("Authentication failed");
+    } finally {
+      tokenPromise = null;
     }
-  }
-  return cachedToken;
+  })();
+  return tokenPromise;
 }
 
-const HUBSPOT_TOKEN = process.env.private_token;
+const HUBSPOT_TOKEN = process.env.bac_private_token;
 
-// Allowlist of emails that get thread IDs stored
+// PILOT PHASE: Thread storage limited to known testers.
+// For production, replace with a HubSpot contact property flag or list membership check.
 const THREAD_STORE_EMAILS = [
   "rbraamburg@bacpartners.com.au",
   "katrina@bmnz.org.nz",
   "colin@bmnz.org.nz",
+  "june@bmnz.org.nz",
+  "david.altena@smartspace.ai",
+  "sarah@bmnz.org.nz",
+  "duriemk@gmail.com",
+  "justin@flitter.co.nz",
 ];
 
 async function storeThreadId(email, threadId) {
@@ -139,6 +156,13 @@ exports.main = async (context, sendResponse) => {
     });
   }
 
+  if (!payload && action !== "getHistory") {
+    return sendResponse({
+      body: { success: false, error: "Missing payload" },
+      statusCode: 400,
+    });
+  }
+
   // Authenticate the calling user via HubSpot contact context
   const contact = context.contact;
   if (!contact) {
@@ -171,6 +195,7 @@ exports.main = async (context, sendResponse) => {
       "Content-Type": "application/json",
     };
 
+    // NOTE: Action dispatch via if-chain. Consider refactoring to a handler map if more actions are added.
     // ============================================
     // ACTION: CHAT
     // ============================================
@@ -372,7 +397,7 @@ exports.main = async (context, sendResponse) => {
               success: true,
               messageThreadId: threadId,
               status: "polling_required",
-              error: chatError.response?.data || chatError.message,
+              error: "Message delivery uncertain",
             },
             statusCode: 200,
           });
@@ -512,7 +537,7 @@ exports.main = async (context, sendResponse) => {
         // Return processing status on error to allow retry
         return sendResponse({
           body: {
-            success: true,
+            success: false,
             status: "error_retry",
             data: [],
             messageThreadId,
@@ -564,7 +589,9 @@ exports.main = async (context, sendResponse) => {
 
         // Fetch first message from each thread (in parallel, max 20)
         const threadSummaries = [];
-        const batch = threadIds.slice(-20).reverse(); // Most recent first, cap at 20
+        // Thread list capped at 20. Implement pagination or cache summaries in
+        // HubSpot contact property to reduce per-load SmartSpace API calls.
+        const batch = threadIds.slice(-20).reverse(); // Most recent first
 
         const results = await Promise.allSettled(
           batch.map(async (tid) => {
@@ -645,7 +672,7 @@ exports.main = async (context, sendResponse) => {
       } catch (historyError) {
         console.error("[HISTORY] Error:", historyError.message);
         return sendResponse({
-          body: { success: true, threads: [], error: historyError.message },
+          body: { success: false, threads: [], error: historyError.message },
           statusCode: 200,
         });
       }
@@ -667,6 +694,7 @@ exports.main = async (context, sendResponse) => {
       console.log(`[THREAD] Fetching full thread ${threadId} for ${userEmail}`);
 
       try {
+        // Thread messages capped at 100. Pagination not yet implemented.
         const messagesRes = await axios.get(
           `${SMARTSPACE_API_URL}/messagethreads/${threadId}/messages?take=100&skip=0`,
           { headers: authHeader, timeout: 8000 }
@@ -700,7 +728,7 @@ exports.main = async (context, sendResponse) => {
 
         // Parse messages into a clean format
         const parsed = [];
-        for (const msg of allMessages.reverse()) { // Chronological order
+        for (const msg of [...allMessages].reverse()) { // Chronological order
           const promptVal = msg.values?.find(
             (v) => v.name === "prompt" && v.type === "Input"
           )?.value;
@@ -835,8 +863,7 @@ exports.main = async (context, sendResponse) => {
     return sendResponse({
       body: {
         success: false,
-        error: "Proxy Failure",
-        details: errorData,
+        error: "An internal error occurred",
         timestamp: new Date().toISOString(),
       },
       statusCode: 500,
