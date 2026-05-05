@@ -86,6 +86,18 @@ const POLL_EXTENDED_DELAY_MS = 3000;
 const POLL_FAST_PHASE_COUNT = 5;
 const THREAD_CACHE_MAX = 20;
 
+// Streaming behaviour. Set to false to fall back to the pre-streaming render
+// path (single bubble after completion) without removing the streaming code.
+// Useful for fast rollback if SmartSpace streaming behaviour regresses.
+const STREAMING_ENABLED = true;
+// If `streamingText` doesn't grow for this many ms while polling continues,
+// treat the stream as stalled and stop. Prevents a frozen typewriter when the
+// SmartSpace flow hangs mid-response.
+const STREAM_STALL_TIMEOUT_MS = 8000;
+// Cap on the post-completion drain so the streaming bubble has time to render
+// any remaining buffered text before being replaced by the final markdown bubble.
+const STREAM_DRAIN_MAX_MS = 800;
+
 const ChatWidget = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -107,6 +119,21 @@ const ChatWidget = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
   const [pollingHint, setPollingHint] = useState(null);
+  // Streaming Response — `streamingText` is the latest cumulative Response text
+  // returned from a `getStatus` poll while the SmartSpace flow is still running.
+  // `displayedStreamingText` is what the typewriter has rendered so far; it lags
+  // `streamingText` by a few hundred ms and catches up adaptively (faster when the
+  // backlog is large). On completion the final text is appended to `messages` and
+  // these are cleared.
+  const [streamingText, setStreamingText] = useState("");
+  const [displayedStreamingText, setDisplayedStreamingText] = useState("");
+  const streamingMessageId = useRef(null);
+  // Mirror of displayedStreamingText for synchronous reads from async code paths
+  // (the post-completion drain in sendMessage's finally block).
+  const displayedStreamingTextRef = useRef("");
+  useEffect(() => {
+    displayedStreamingTextRef.current = displayedStreamingText;
+  }, [displayedStreamingText]);
   // Status hint throttling - SmartSpace emits progressive Status values during a long
   // response (e.g. "Searching meeting minutes..."). We show the latest one, but enforce
   // a minimum display time so rapid updates don't flicker past the user.
@@ -114,6 +141,34 @@ const ChatWidget = () => {
   const STATUS_MAX_CHARS = 200;
   const lastStatusText = useRef(null);
   const lastStatusShownAt = useRef(0);
+
+  // Typewriter effect: advance `displayedStreamingText` toward `streamingText` at an
+  // adaptive pace. With a small backlog we render ~33 chars/sec (comfortable to read).
+  // When chunks pile up (e.g. server emitted 200 new chars between polls) we accelerate
+  // proportionally so we never fall too far behind. The interval clears itself once
+  // caught up, and is recreated each time `streamingText` advances.
+  useEffect(() => {
+    if (!streamingText) return;
+    const id = setInterval(() => {
+      setDisplayedStreamingText((prev) => {
+        // If the target is now SHORTER than what we've displayed (server hiccup,
+        // messageId switch, or new prefix), truncate and stop ticking.
+        if (prev.length > streamingText.length) {
+          clearInterval(id);
+          return streamingText;
+        }
+        // Caught up: stop ticking until the target advances again.
+        if (prev.length === streamingText.length) {
+          clearInterval(id);
+          return prev;
+        }
+        const backlog = streamingText.length - prev.length;
+        const chunk = Math.max(1, Math.floor(backlog / 12));
+        return streamingText.slice(0, prev.length + chunk);
+      });
+    }, 30);
+    return () => clearInterval(id);
+  }, [streamingText]);
   const pendingStatusTimer = useRef(null);
   const statusReceivedEver = useRef(false); // True if ANY status has arrived this turn
   const applyStatusHint = (text) => {
@@ -142,6 +197,11 @@ const ChatWidget = () => {
     lastStatusShownAt.current = 0;
     statusReceivedEver.current = false;
     setPollingHint(null);
+  };
+  const clearStreamingBubble = () => {
+    setStreamingText("");
+    setDisplayedStreamingText("");
+    streamingMessageId.current = null;
   };
   // Unmount cleanup - prevents setState-on-unmounted-component if a queued status
   // hint fires after the widget is removed from the DOM.
@@ -270,6 +330,7 @@ const ChatWidget = () => {
 
     setThreadLoading(true);
     setMessages([]);
+    clearStreamingBubble();
     try {
       const result = await smartspaceService.getThread(threadId);
 
@@ -347,6 +408,7 @@ const ChatWidget = () => {
     setMessageThreadId(null);
     setViewingThread(null);
     lastBotMessageId.current = null;
+    clearStreamingBubble();
     setConnectionStatus("idle");
   };
 
@@ -528,6 +590,7 @@ const ChatWidget = () => {
           setMessages([]);
           setMessageThreadId(null);
           setViewingThread(null);
+          clearStreamingBubble();
           setConnectionStatus("idle");
         }
       }
@@ -660,6 +723,12 @@ const ChatWidget = () => {
     // Default hint shown immediately so the widget feels responsive while we wait for
     // SmartSpace's first Status emission. Replaced as soon as a real Status arrives.
     setPollingHint("Thinking...");
+    // Stall watchdog: track the last time `streamingText` advanced and bail out if
+    // it stops growing while polling continues. Prevents a frozen typewriter when
+    // the SmartSpace flow hangs mid-response.
+    let lastGrowthLen = 0;
+    let lastGrowthAt = Date.now();
+    let lastStreamingText = "";
 
     for (let i = 0; i < maxAttempts; i++) {
       // Check if this operation has been superseded
@@ -667,6 +736,16 @@ const ChatWidget = () => {
         console.log(`[Widget] Poll aborted - gen ${gen} superseded by ${operationGen.current}`);
         clearStatusHint();
         return null;
+      }
+
+      // Stall watchdog (top-of-loop): if we have streaming text but it hasn't
+      // grown for STREAM_STALL_TIMEOUT_MS, treat the stream as stalled and
+      // return the last good text. Placement matters — must be checked BEFORE
+      // we process this iteration's response, since most stall scenarios still
+      // return non-empty text on every poll (it just doesn't grow).
+      if (lastStreamingText && Date.now() - lastGrowthAt > STREAM_STALL_TIMEOUT_MS) {
+        console.warn(`[Widget] Stream stalled for ${STREAM_STALL_TIMEOUT_MS}ms — returning current text`);
+        return lastStreamingText;
       }
 
       // Fallback hints for queries where SmartSpace doesn't emit a Status field
@@ -708,23 +787,48 @@ const ChatWidget = () => {
         const result = parseBotResponse(response);
 
         if (result && result.text) {
-          // Check if this is a new message ID
-          if (
-            result.messageId &&
-            result.messageId !== lastBotMessageId.current
-          ) {
-            console.log(`[Widget] New message found: ${result.messageId}`);
-            lastBotMessageId.current = result.messageId;
+          // messageId transition: a fresh bot reply on the same thread (rare,
+          // but possible if the user retried). Reset BOTH streaming target and
+          // displayed text in the same render so React batches the transition
+          // and we don't get a one-frame flash of the old text.
+          if (result.messageId && streamingMessageId.current && result.messageId !== streamingMessageId.current) {
+            console.log(`[Widget] streaming messageId changed: ${streamingMessageId.current} → ${result.messageId} — resetting bubble`);
+            setStreamingText("");
+            setDisplayedStreamingText("");
+            displayedStreamingTextRef.current = "";
+            // Reset growth tracker so the watchdog timeline starts fresh.
+            lastGrowthLen = 0;
+            lastGrowthAt = Date.now();
+            lastStreamingText = "";
+          }
+          if (result.messageId) {
+            streamingMessageId.current = result.messageId;
+          }
+          // Clear the polling hint as soon as real text starts arriving — the
+          // streaming bubble is now the visible feedback to the user.
+          clearStatusHint();
+          // Update streaming target. If the feature flag is off, only render the
+          // final response (so we get a single typewriter pass on the full text).
+          if (STREAMING_ENABLED || response.status === "completed") {
+            setStreamingText(result.text);
+          }
+
+          // Track growth for the stall watchdog.
+          if (result.text.length > lastGrowthLen) {
+            lastGrowthLen = result.text.length;
+            lastGrowthAt = Date.now();
+            lastStreamingText = result.text;
+          }
+
+          // Final response — return so the caller can append to messages array.
+          if (response.status === "completed") {
+            if (result.messageId) lastBotMessageId.current = result.messageId;
             return result.text;
           }
 
-          // If we got text but no new message ID, and status is completed, assume it's new
-          if (!result.messageId && response.status === "completed") {
-            console.log("[Widget] Message found (no ID), assuming new");
-            return result.text;
-          }
-
-          console.log("[Widget] Message already displayed, continuing poll");
+          // status === "streaming" → keep polling, the typewriter is showing progress.
+          // Stall watchdog runs at the top of the next iteration.
+          continue;
         }
 
         // If status indicates we should stop polling
@@ -784,6 +888,9 @@ const ChatWidget = () => {
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
+    // Reset streaming bubble state for the new request — any leftover partial
+    // text from a prior send must not bleed into this conversation turn.
+    clearStreamingBubble();
     // Show the default hint immediately - the proxy round-trip is up to ~8s before
     // polling starts, so without this the user sees dots-only during that window.
     setPollingHint("Thinking...");
@@ -884,12 +991,46 @@ const ChatWidget = () => {
       const finalBotMsg =
         botText || "I'm having trouble connecting. Please try again later.";
 
+      // If the typewriter is mid-flight (displayed text shorter than the final),
+      // give it a brief drain window to catch up before we replace the streaming
+      // bubble with the final markdown-rendered message. Adaptive pacing means
+      // even a multi-kchar backlog catches up well within STREAM_DRAIN_MAX_MS.
+      // We poll the displayed-length ref so we exit early once caught up rather
+      // than always waiting the full ceiling.
+      //
+      // Guard: only drain when streaming was actually engaged for this turn.
+      // Without this, a feature-flag-disabled session or an error path would
+      // wall-clock the full STREAM_DRAIN_MAX_MS for nothing (displayed = 0,
+      // finalBotMsg > 0, condition permanently true).
+      const streamingEngaged = streamingText && streamingText.length > 0;
+      if (!isError && streamingEngaged && finalBotMsg && displayedStreamingTextRef.current.length < finalBotMsg.length) {
+        const drainStart = Date.now();
+        while (
+          operationGen.current === myGen &&
+          displayedStreamingTextRef.current.length < finalBotMsg.length &&
+          Date.now() - drainStart < STREAM_DRAIN_MAX_MS
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+      }
+
+      // Generation may have been superseded during the drain — re-check before
+      // mutating UI so a new in-flight conversation isn't polluted.
+      if (operationGen.current !== myGen) {
+        isSending.current = false;
+        setPending(false);
+        clearStatusHint();
+        return;
+      }
+
       setMessages((prev) => [...prev, {
         id: nextMsgId(),
         sender: "bot",
         text: isError ? finalBotMsg : preprocessMarkdown(finalBotMsg),
         isError,
       }]);
+      // Clear the streaming bubble now that the final message is in the list.
+      clearStreamingBubble();
 
       // Invalidate cache so next history click re-fetches full thread.
       // Active thread is in `messages` state, so the miss only costs one API call.
@@ -1134,7 +1275,23 @@ const ChatWidget = () => {
               )}
             </div>
           ))}
-          {loading && (
+          {/* Streaming bubble — rendered live as the typewriter advances toward
+              the current `streamingText` target. Replaces the loading dots once
+              real text starts arriving. */}
+          {displayedStreamingText && (
+            <div className="chat-message bot streaming" aria-live="polite">
+              <div style={{ textAlign: "left", width: "100%" }}>
+                <ReactMarkdown
+                  remarkPlugins={REMARK_PLUGINS}
+                  components={MARKDOWN_COMPONENTS}
+                >
+                  {preprocessMarkdown(displayedStreamingText)}
+                </ReactMarkdown>
+                <span className="streaming-cursor" aria-hidden="true">▍</span>
+              </div>
+            </div>
+          )}
+          {loading && !displayedStreamingText && (
             <>
               <div className="loading">
                 <span className="dot"></span>

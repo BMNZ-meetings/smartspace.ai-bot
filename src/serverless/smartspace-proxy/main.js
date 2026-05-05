@@ -445,33 +445,38 @@ exports.main = async (context, sendResponse) => {
         // 15-second buffer to account for clock drift and processing time
         const isFresh = msgTimestamp > userMsgTimestamp - 15000;
 
-        // Also check if we've already seen this message ID
         const isNewMessage =
           !lastMessageId || latestOutputMessage.id !== lastMessageId;
 
         console.log(`[STATUS] Message analysis:`, {
           messageId: latestOutputMessage.id,
-          messageTime: latestOutputMessage.createdAt,
           isFresh,
           isNewMessage,
+          isFlowRunning: threadRes.data.isFlowRunning,
           lastMessageId,
         });
 
-        // Return the message only if it's both fresh AND new
-        if (isFresh && isNewMessage) {
+        // Streaming-aware return path: always emit the latest values for a fresh
+        // message, regardless of whether we've seen its id before. The widget uses
+        // status to decide whether to keep polling ("streaming") or stop ("completed"),
+        // and uses the value lengths to detect growth between polls. This is what
+        // lets the widget render Response text progressively as SmartSpace streams it.
+        if (isFresh) {
           return sendResponse({
             body: {
               success: true,
-              status: "completed",
+              status: threadRes.data.isFlowRunning ? "streaming" : "completed",
               data: latestOutputMessage.values,
               messageId: latestOutputMessage.id,
               messageThreadId,
+              currentStatus: latestStatusText,
             },
             statusCode: 200,
           });
         }
 
-        // Message exists but it's stale or already shown
+        // Stale: the message we found is older than the user's last send. Tell the
+        // widget to stop polling.
         return sendResponse({
           body: {
             success: true,

@@ -15333,19 +15333,20 @@ exports.main = async (context, sendResponse) => {
         const isNewMessage = !lastMessageId || latestOutputMessage.id !== lastMessageId;
         console.log(`[STATUS] Message analysis:`, {
           messageId: latestOutputMessage.id,
-          messageTime: latestOutputMessage.createdAt,
           isFresh,
           isNewMessage,
+          isFlowRunning: threadRes.data.isFlowRunning,
           lastMessageId
         });
-        if (isFresh && isNewMessage) {
+        if (isFresh) {
           return sendResponse({
             body: {
               success: true,
-              status: "completed",
+              status: threadRes.data.isFlowRunning ? "streaming" : "completed",
               data: latestOutputMessage.values,
               messageId: latestOutputMessage.id,
-              messageThreadId
+              messageThreadId,
+              currentStatus: latestStatusText
             },
             statusCode: 200
           });

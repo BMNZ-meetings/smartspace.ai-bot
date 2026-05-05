@@ -330,6 +330,23 @@ body > .wrapper.footer-wrapper {
   font-style: italic !important;
 }
 
+/* Streaming bubble — bot message rendered live as the typewriter advances.
+   The blinking cursor signals to the user that more text is on its way. */
+.streaming-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: currentColor;
+  opacity: 0.6;
+  animation: streamingCursorBlink 1s steps(2) infinite;
+  vertical-align: baseline;
+  font-weight: normal;
+}
+
+@keyframes streamingCursorBlink {
+  0%, 50% { opacity: 0.6; }
+  50.01%, 100% { opacity: 0; }
+}
+
 /* Ensure all child elements in bot messages inherit the font size */
 .chat-message.bot * {
   text-align: left !important;
