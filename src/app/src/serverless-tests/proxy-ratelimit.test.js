@@ -23,6 +23,9 @@ describe("rate limiting", () => {
       if (url.includes("oauth2")) {
         return Promise.resolve({ data: { access_token: "t", expires_in: 3600 } });
       }
+      if (url.includes("/messagethreads")) {
+        return Promise.resolve({ data: { id: VALID_THREAD_ID } });
+      }
       if (url.includes("/messages")) {
         return Promise.resolve({
           data: { messageThreadId: VALID_THREAD_ID, id: "msg-1" },

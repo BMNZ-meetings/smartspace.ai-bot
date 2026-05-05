@@ -20,6 +20,9 @@ function wrapInIIFE() {
 export default defineConfig({
   plugins: [react()],
   build: {
+    // Keep CSS readable so it can be tweaked in the HubSpot File Manager for
+    // quick ad-hoc changes. JS stays minified (harder to edit anyway + bigger size win).
+    cssMinify: false,
     // Ensuring the output goes directly into the JS/CSS folders you use in HubSpot
     rollupOptions: {
       plugins: [wrapInIIFE()],
