@@ -15528,13 +15528,17 @@ exports.main = async (context, sendResponse) => {
           }
           let responseText = "";
           if (responseVal) {
-            if (Array.isArray(responseVal)) {
+            if (typeof responseVal === "string") {
+              responseText = responseVal;
+            } else if (responseVal && typeof responseVal === "object" && !Array.isArray(responseVal)) {
+              if (typeof responseVal.response === "string") responseText = responseVal.response;
+              else if (typeof responseVal.text === "string") responseText = responseVal.text;
+              else if (typeof responseVal.value === "string") responseText = responseVal.value;
+            } else if (Array.isArray(responseVal)) {
               const meaningful = responseVal.filter(
                 (s) => typeof s === "string" && s.trim().length > 20
               );
-              responseText = meaningful.length > 0 ? meaningful[meaningful.length - 1] : responseVal[0] || "";
-            } else {
-              responseText = String(responseVal);
+              responseText = meaningful.length > 0 ? meaningful[meaningful.length - 1] : typeof responseVal[0] === "string" ? responseVal[0] : "";
             }
           }
           if (promptText) {

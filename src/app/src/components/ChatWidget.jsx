@@ -655,12 +655,16 @@ const ChatWidget = () => {
 
   useEffect(() => {
     if (chatBodyRef.current && isNearBottom.current) {
+      // Instant scroll during streaming (typewriter ticks every 30ms — smooth
+      // animations would constantly interrupt themselves), smooth scroll for
+      // static message/loading transitions.
+      const isStreaming = displayedStreamingText && displayedStreamingText.length > 0;
       chatBodyRef.current.scrollTo({
         top: chatBodyRef.current.scrollHeight,
-        behavior: "smooth",
+        behavior: isStreaming ? "auto" : "smooth",
       });
     }
-  }, [messages, loading]);
+  }, [messages, loading, displayedStreamingText]);
 
   /**
    * Parse the bot response from the proxy data
@@ -690,17 +694,25 @@ const ChatWidget = () => {
     const val = botEntry.value;
     let text = null;
 
-    // Handle array values (extract meaningful text)
-    if (Array.isArray(val)) {
+    // Response.value can take three shapes depending on workspace config:
+    //   - string  (non-streaming workspaces): "answer text"
+    //   - object  (streaming workspaces):     { response: "answer text" }
+    //   - array   (legacy / multi-output):    [..., "answer text"]
+    if (typeof val === "string") {
+      text = val;
+    } else if (val && typeof val === "object" && !Array.isArray(val)) {
+      // Streaming-on shape — extract whichever text-bearing field is present.
+      if (typeof val.response === "string") text = val.response;
+      else if (typeof val.text === "string") text = val.text;
+      else if (typeof val.value === "string") text = val.value;
+    } else if (Array.isArray(val)) {
       const meaningfulText = val.filter(
         (s) => typeof s === "string" && s.trim().length > 20,
       );
       text =
         meaningfulText.length > 0
           ? meaningfulText[meaningfulText.length - 1]
-          : val[0] || null;
-    } else {
-      text = String(val);
+          : (typeof val[0] === "string" ? val[0] : null);
     }
 
     if (!text) {
@@ -1277,29 +1289,32 @@ const ChatWidget = () => {
           ))}
           {/* Streaming bubble — rendered live as the typewriter advances toward
               the current `streamingText` target. Replaces the loading dots once
-              real text starts arriving. */}
+              real text starts arriving. The cursor is a CSS ::after pseudo-element
+              attached to the last block child so it lands inline at the end of
+              the rendered text rather than on its own line. */}
           {displayedStreamingText && (
             <div className="chat-message bot streaming" aria-live="polite">
-              <div style={{ textAlign: "left", width: "100%" }}>
+              <div className="streaming-body">
                 <ReactMarkdown
                   remarkPlugins={REMARK_PLUGINS}
                   components={MARKDOWN_COMPONENTS}
                 >
                   {preprocessMarkdown(displayedStreamingText)}
                 </ReactMarkdown>
-                <span className="streaming-cursor" aria-hidden="true">▍</span>
               </div>
             </div>
           )}
           {loading && !displayedStreamingText && (
-            <>
-              <div className="loading">
-                <span className="dot"></span>
-                <span className="dot"></span>
-                <span className="dot"></span>
-              </div>
-              {pollingHint && <div className="thread-loading-text">{pollingHint}</div>}
-            </>
+            <div className="loading">
+              <span className="dot"></span>
+              <span className="dot"></span>
+              <span className="dot"></span>
+              {pollingHint && (
+                <span key={pollingHint} className="thinking-status">
+                  {pollingHint}
+                </span>
+              )}
+            </div>
           )}
         </div>
 
