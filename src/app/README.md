@@ -1,48 +1,62 @@
-# React + Vite
+# BMNZ Digital Mentor — chat widget
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The Digital Mentor (DM) chat widget shipped on Mentor Hub. Authenticated mentors and mentees ask questions; the widget proxies through a HubSpot serverless function to the SmartSpace Chat API and renders the response.
 
-Currently, two official plugins are available:
+## Architecture
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```
+Mentor Hub (HubSpot CMS)
+        │
+        ▼
+ChatWidget.jsx ──── HubSpot membership context ─── userEmail
+        │
+        ▼
+src/serverless/smartspace-proxy/main.js
+        │  Auth: client credentials (Entra) → SmartSpace API
+        │  Rate limit: 20 msg/min/user
+        │  Two-step pattern: create thread → send message
+        │
+        ▼
+SmartSpace Chat API
+  POST /workspaces/{ws}/messagethreads        (create thread)
+  POST /messages                              (send message)
+  GET  /MessageThreads/{id}                   (poll isFlowRunning)
+  GET  /messagethreads/{id}/messages?take=5   (poll for Response)
+```
 
-## React Compiler
+Proxy actions: `chat`, `getStatus`, `getHistory`, `getThread`, `deleteThread`. Thread IDs persist on the contact's `smartspace_thread_ids` property.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Why polling, not SSE
 
-## Expanding the ESLint configuration
+HubSpot serverless functions are hard-killed at 10 seconds. SmartSpace's `/messages` endpoint can hold the connection open longer than that for streaming-enabled workspaces, so the proxy uses a tight 4-second timeout on `/messages` and falls through to a `polling_required` response. The widget polls `getStatus` every 1.5–3s until the bot response lands or `isFlowRunning` flips false. Polling budget is ~112s (40 attempts).
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+See `output/20260505_reply_stefan_streaming_findings.html` in the parent project for the streaming validation work against CreativeQ's test workspace.
 
-## Todo:
+## Build and deploy
 
-- [x] remove `const userEmail = window.currentUserEmail || null;` from App.jsx
-- [x] Use HubSpot's context parameter in `main.js`
-- [x] Validate `action` in `main.js`
-- [x] Set max length message
-- [x] Validate `messageThreadId` format
-- [ ] Remove logging from FE
-- [x] Add rate limiting `main.js`
+| Task | Command |
+|---|---|
+| Dev server | `npm run dev` |
+| Build widget bundle | `npm run build` |
+| Run tests | `npm test` |
+
+The widget JS is built via Vite. CSS is hand-copied into HubSpot Design Manager. The serverless proxy is bundled separately under `src/serverless/smartspace-proxy/`.
+
+## Outstanding
+
+### Streaming
+- [ ] Wire up progressive token rendering once CreativeQ confirms whether progressive Response writes (or `/MessageThreads/{id}/messages/stream` deltas during in-flight) are part of the streaming change. As of 5 May 2026 the test workspace emits final Response only, no deltas — see findings doc above.
 
 ### Security
-- [ ] Sanitize error responses in `main.js` — don't leak internal error details to client (lines 280, 439)
-- [ ] Validate `payload` exists in `main.js` before accessing properties (line 66)
-- [ ] Add periodic cleanup to `rateLimitMap` to prevent unbounded memory growth
-- [ ] Filter thread recovery lookup by user email to prevent cross-user thread leakage (line 227)
+- [ ] Sanitize error responses in `main.js` — don't leak internal error details to client
+- [ ] Add periodic cleanup to `rateLimitMap` to prevent unbounded memory growth (partially done — pruned every 100 checks)
 - [ ] Remove unused `history` parameter from `smartspace.js` payload (or validate/cap its size)
 
-### Efficiency
-- [ ] Deduplicate concurrent token refresh requests in `main.js` `getAuthToken()`
-- [ ] Add polling cleanup on component unmount in `ChatWidget.jsx`
-- [x] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
+### Hygiene
+- [ ] Remove logging from FE
+- [ ] Add polling cleanup on `ChatWidget` unmount
+- [ ] Deduplicate concurrent token refresh requests in `getAuthToken()` (partially done — promise singleton)
 
-### Improvements (from Smartspace reference app review)
-- [x] Add `remarkGfm` to `ReactMarkdown` for tables, strikethrough, task lists
-- [x] Add `target="_blank"` + `rel="noopener noreferrer"` to markdown links
-- [x] Handle 429 rate limit response in `ChatWidget.jsx` with user-friendly message
-- [x] Add React `ErrorBoundary` around `ChatWidget` in `App.jsx`
-- [x] Replace deprecated `onKeyPress` with `onKeyDown` in `ChatWidget.jsx`
-- [ ] Investigate SSE streaming responses instead of polling — requires scoping whether HubSpot serverless functions can proxy an SSE stream
-- [ ] Consider React Query for state management — beneficial if expanding to multi-thread/sidebar UI, overkill for current single-widget scope
-- [ ] Add Zod schema validation on SmartSpace API responses — catches breaking API changes early, moderate effort to implement
+### Future
+- [ ] Add Zod schema validation on SmartSpace API responses to catch breaking API changes early
+- [ ] Consider React Query if expanding to multi-thread / sidebar UI (overkill for single-widget scope)
