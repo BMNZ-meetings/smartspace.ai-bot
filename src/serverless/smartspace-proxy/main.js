@@ -51,23 +51,8 @@ async function getAuthToken() {
 
 const HUBSPOT_TOKEN = process.env.bac_private_token;
 
-// PILOT PHASE: Thread storage limited to known testers.
-// For production, replace with a HubSpot contact property flag or list membership check.
-const THREAD_STORE_EMAILS = [
-  "rbraamburg@bacpartners.com.au",
-  "katrina@bmnz.org.nz",
-  "colin@bmnz.org.nz",
-  "june@bmnz.org.nz",
-  "david.altena@smartspace.ai",
-  "sarah@bmnz.org.nz",
-  "duriemk@gmail.com",
-  "justin@flitter.co.nz",
-];
-
+// Thread storage is available to all authenticated contacts on the Digital Mentor pilot.
 async function storeThreadId(email, threadId) {
-  if (!THREAD_STORE_EMAILS.includes(email.toLowerCase())) {
-    return;
-  }
   try {
     const searchRes = await axios.post(
       'https://api.hubapi.com/crm/v3/objects/contacts/search',
@@ -75,7 +60,9 @@ async function storeThreadId(email, threadId) {
         filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: email }] }],
         properties: ['smartspace_thread_ids']
       },
-      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+      // Tight timeout — storeThreadId is fire-and-forget; its tail must drain quickly
+      // so it doesn't extend the Lambda event loop past HubSpot's 10s kill.
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 2000 }
     );
 
     const contact = searchRes.data.results?.[0];
@@ -103,7 +90,7 @@ async function storeThreadId(email, threadId) {
     await axios.patch(
       `https://api.hubapi.com/crm/v3/objects/contacts/${contact.id}`,
       { properties: { smartspace_thread_ids: JSON.stringify(threadIds) } },
-      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 2000 }
     );
 
     console.log(`[THREAD-STORE] Stored thread ${threadId} for ${email} (total: ${threadIds.length})`);
@@ -236,20 +223,57 @@ exports.main = async (context, sendResponse) => {
       }
       const isFirstMessage = !threadId;
 
+      // Two-step pattern (agreed with SmartSpace/Stefan): create thread first, then send
+      // the message. SmartSpace's /messages endpoint can hold the connection open beyond
+      // HubSpot's 10s execution limit, so we use a tight axios timeout on the message send
+      // and let the catch block convert a timeout into `polling_required` for the widget.
+      //
+      // Timeout budget (HubSpot hard-kills at 10s):
+      //   thread create (5s) + message send (4s) = 9s worst case in this handler.
+      //   Thread create gets the larger share because it's the critical path — a failed
+      //   thread create is unrecoverable, whereas a message-send timeout falls through to
+      //   polling where the widget can still pick up the response.
+      //   storeThreadId runs fire-and-forget with its own tight internal timeouts (see top of file).
+      let activeThreadId = threadId;
+
+      if (isFirstMessage) {
+        try {
+          console.log("[CHAT] Creating thread first (two-step pattern)");
+          const threadResponse = await axios.post(
+            `${SMARTSPACE_API_URL}/workspaces/${SMARTSPACE_WORKSPACE_ID}/messagethreads`,
+            { name: chatMsg.substring(0, 120) },
+            { headers: authHeader, timeout: 5000 },
+          );
+          activeThreadId = threadResponse.data.id;
+          console.log(`[CHAT] Thread created: ${activeThreadId}`);
+
+          // Store thread ID against HubSpot contact (fire-and-forget)
+          storeThreadId(userEmail, activeThreadId);
+        } catch (createError) {
+          console.error("[CHAT] Failed to create thread:", createError.message);
+          return sendResponse({
+            body: {
+              success: false,
+              error: "Failed to start conversation",
+              message: "The chat service is temporarily unavailable. Please try again.",
+              canRetry: true,
+              timestamp: new Date().toISOString(),
+            },
+            statusCode: 200,
+          });
+        }
+      }
+
       const smartspacePayload = {
         workSpaceId: SMARTSPACE_WORKSPACE_ID,
+        messageThreadId: activeThreadId,
         inputs: [
           { name: "prompt", value: [{ text: chatMsg }] },
           { name: "email", value: userEmail },
         ],
       };
 
-      // Only include messageThreadId if it exists (for follow-up messages)
-      if (threadId) {
-        smartspacePayload.messageThreadId = threadId;
-      }
-
-      console.log(`[CHAT] Sending (first=${isFirstMessage}, thread=${threadId || 'new'})`);
+      console.log(`[CHAT] Sending message (first=${isFirstMessage}, thread=${activeThreadId})`);
 
       try {
         const apiResponse = await axios.post(
@@ -257,22 +281,16 @@ exports.main = async (context, sendResponse) => {
           smartspacePayload,
           {
             headers: authHeader,
-            timeout: 7000, // Must be under HubSpot's 10s execution limit
+            timeout: 4000, // Kept tight so thread_create + message_send stays under HubSpot's 10s kill.
           },
         );
 
-        const responseThreadId = apiResponse.data.messageThreadId || threadId;
-        console.log(`[CHAT] Response received (thread=${responseThreadId})`);
-
-        // Store thread ID against HubSpot contact (fire-and-forget)
-        if (isFirstMessage && responseThreadId) {
-          storeThreadId(userEmail, responseThreadId);
-        }
+        console.log(`[CHAT] Response received (thread=${activeThreadId})`);
 
         return sendResponse({
           body: {
             success: true,
-            messageThreadId: responseThreadId,
+            messageThreadId: activeThreadId,
             messageId: apiResponse.data.id,
             status: "accepted",
             timestamp: new Date().toISOString(),
@@ -280,122 +298,25 @@ exports.main = async (context, sendResponse) => {
           statusCode: 200,
         });
       } catch (chatError) {
-        console.error("[CHAT] SmartSpace API Error:", {
-          status: chatError.response?.status,
-          statusText: chatError.response?.statusText,
-          data: chatError.response?.data,
-          message: chatError.message,
-          isTimeout: chatError.code === "ECONNABORTED",
-          isFirstMessage,
-        });
-
-        // SPECIAL HANDLING FOR FIRST MESSAGE TIMEOUT
-        if (isFirstMessage && chatError.code === "ECONNABORTED") {
-          console.log(
-            "[CHAT] First message timed out - trying to find the created thread",
-          );
-          // The message was likely queued even though we timed out
-          // Try to find the thread that was created
-          try {
-            const threadsResponse = await axios.get(
-              `${SMARTSPACE_API_URL}/WorkSpaces/${SMARTSPACE_WORKSPACE_ID}/messageThreads?take=5`,
-              {
-                headers: authHeader,
-                timeout: 2000,
-              },
-            );
-
-            console.log(
-              `[CHAT] Found ${threadsResponse.data.data?.length || 0} recent threads`,
-            );
-
-            // Look for a very recent thread (created in last 30 seconds)
-            const now = new Date().getTime();
-            const recentThreads = (threadsResponse.data.data || []).filter(
-              (thread) => {
-                const createdAt = new Date(thread.createdAt).getTime();
-                const ageSeconds = (now - createdAt) / 1000;
-                return ageSeconds < 30;
-              },
-            );
-
-            // Verify ownership: check each candidate thread's first message
-            // to ensure the email matches the requesting user
-            let ownedThread = null;
-            for (const candidate of recentThreads) {
-              try {
-                const threadMsgs = await axios.get(
-                  `${SMARTSPACE_API_URL}/messagethreads/${candidate.id}/messages?take=1&skip=0`,
-                  { headers: authHeader, timeout: 2000 },
-                );
-                const firstMsg = threadMsgs.data.data?.[0];
-                const threadEmail = firstMsg?.values?.find(
-                  (v) => v.name === "email" && v.type === "Input",
-                )?.value;
-
-                if (threadEmail === userEmail) {
-                  ownedThread = candidate;
-                  break;
-                }
-                console.warn(
-                  `[CHAT] Thread ${candidate.id} belongs to a different user — skipping`,
-                );
-              } catch (verifyError) {
-                console.warn(
-                  `[CHAT] Could not verify thread ${candidate.id}:`,
-                  verifyError.message,
-                );
-              }
-            }
-
-            if (ownedThread) {
-              console.log(
-                `[CHAT] Found verified thread: ${ownedThread.id}`,
-              );
-              // Store thread ID against HubSpot contact (fire-and-forget)
-              storeThreadId(userEmail, ownedThread.id);
-              return sendResponse({
-                body: {
-                  success: true,
-                  messageThreadId: ownedThread.id,
-                  status: "timeout_with_thread",
-                  message: "Message was sent but response is pending",
-                  timestamp: new Date().toISOString(),
-                },
-                statusCode: 200,
-              });
-            }
-
-            console.warn(
-              "[CHAT] No recent thread found, message may have failed",
-            );
-          } catch (findThreadError) {
-            console.error(
-              "[CHAT] Failed to find created thread:",
-              findThreadError.message,
-            );
-          }
-
-          // Couldn't find a thread, return error
-          return sendResponse({
-            body: {
-              success: false,
-              error: "First message timeout",
-              message:
-                "The chat service is taking longer than expected. Please try again.",
-              canRetry: true,
-              timestamp: new Date().toISOString(),
-            },
-            statusCode: 200, // Return 200 so frontend can handle gracefully
+        const isTimeout = chatError.code === "ECONNABORTED";
+        if (isTimeout) {
+          console.warn(`[CHAT] Message send timed out (${isFirstMessage ? "first" : "follow-up"}) - returning polling_required`);
+        } else {
+          console.error("[CHAT] SmartSpace API Error:", {
+            status: chatError.response?.status,
+            statusText: chatError.response?.statusText,
+            data: chatError.response?.data,
+            message: chatError.message,
           });
         }
 
-        // If we have a threadId (follow-up message), tell frontend to poll anyway
-        if (threadId) {
+        // For any timeout or error, return polling_required with the thread ID.
+        // SmartSpace continues processing even if we abort the connection.
+        if (activeThreadId) {
           return sendResponse({
             body: {
               success: true,
-              messageThreadId: threadId,
+              messageThreadId: activeThreadId,
               status: "polling_required",
               error: "Message delivery uncertain",
             },
@@ -403,7 +324,7 @@ exports.main = async (context, sendResponse) => {
           });
         }
 
-        // Other errors on first message
+        // No thread ID available at all - unrecoverable
         throw chatError;
       }
     }
@@ -427,17 +348,19 @@ exports.main = async (context, sendResponse) => {
       );
 
       try {
-        // Fetch both thread status and latest messages in parallel
+        // Fetch both thread status and latest messages in parallel.
+        // Tightened from 8000ms each to 5000ms each: both run in parallel but each is
+        // still bounded by HubSpot's 10s kill if one hangs.
         const [threadRes, messagesRes] = await Promise.all([
           axios.get(`${SMARTSPACE_API_URL}/MessageThreads/${messageThreadId}`, {
             headers: authHeader,
-            timeout: 8000,
+            timeout: 5000,
           }),
           axios.get(
             `${SMARTSPACE_API_URL}/messagethreads/${messageThreadId}/messages?take=5&skip=0`,
             {
               headers: authHeader,
-              timeout: 8000,
+              timeout: 5000,
             },
           ),
         ]);
@@ -450,6 +373,36 @@ exports.main = async (context, sendResponse) => {
         );
 
         const messages = messagesRes.data.data || [];
+
+        // Extract the latest SmartSpace "Status" value across all messages for this thread.
+        // SmartSpace appends Status values (type=Output, name=Status) to the active message
+        // as work progresses (e.g. "Searching meeting minutes...", "Generating response...").
+        // We surface the most recent one to the widget so the user gets progressive feedback.
+        // Values are defensively extracted - SmartSpace may emit a plain string, an array of
+        // strings, or an array of { text: "..." } objects depending on the tool.
+        const extractText = (raw) => {
+          if (!raw) return null;
+          if (typeof raw === "string") return raw;
+          if (Array.isArray(raw) && raw.length > 0) {
+            const last = raw[raw.length - 1]; // Use the most recent entry
+            if (typeof last === "string") return last;
+            if (last && typeof last.text === "string") return last.text;
+          }
+          if (typeof raw === "object" && typeof raw.text === "string") return raw.text;
+          return null;
+        };
+        let latestStatusText = null;
+        for (const msg of messages) {
+          const statusValues = (msg.values || []).filter(
+            (v) =>
+              (v.type === "Output" || String(v.type) === "2") &&
+              v.name === "Status",
+          );
+          if (statusValues.length > 0) {
+            latestStatusText = extractText(statusValues[statusValues.length - 1].value);
+            if (latestStatusText) break;
+          }
+        }
 
         // Find the most recent Output message
         let latestOutputMessage = null;
@@ -468,7 +421,7 @@ exports.main = async (context, sendResponse) => {
 
         // If no output message found, check if flow is still running
         if (!latestOutputMessage) {
-          console.log(`[STATUS] No output message found yet`);
+          console.log(`[STATUS] No output message found yet (currentStatus=${latestStatusText || "null"})`);
           return sendResponse({
             body: {
               success: true,
@@ -477,6 +430,7 @@ exports.main = async (context, sendResponse) => {
                 : "no_response",
               data: [],
               messageThreadId,
+              currentStatus: latestStatusText,
             },
             statusCode: 200,
           });
@@ -524,6 +478,7 @@ exports.main = async (context, sendResponse) => {
             status: threadRes.data.isFlowRunning ? "processing" : "stale",
             data: [],
             messageThreadId,
+            currentStatus: latestStatusText,
           },
           statusCode: 200,
         });

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { smartspaceService } from "../services/smartspace";
@@ -106,6 +107,52 @@ const ChatWidget = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
   const [pollingHint, setPollingHint] = useState(null);
+  // Status hint throttling - SmartSpace emits progressive Status values during a long
+  // response (e.g. "Searching meeting minutes..."). We show the latest one, but enforce
+  // a minimum display time so rapid updates don't flicker past the user.
+  const STATUS_MIN_DISPLAY_MS = 1000;
+  const STATUS_MAX_CHARS = 200;
+  const lastStatusText = useRef(null);
+  const lastStatusShownAt = useRef(0);
+  const pendingStatusTimer = useRef(null);
+  const statusReceivedEver = useRef(false); // True if ANY status has arrived this turn
+  const applyStatusHint = (text) => {
+    if (!text) return;
+    // Defensive cap - guards against unexpectedly long SmartSpace status payloads
+    const capped = text.length > STATUS_MAX_CHARS ? `${text.substring(0, STATUS_MAX_CHARS - 3)}...` : text;
+    if (capped === lastStatusText.current) return;
+    statusReceivedEver.current = true;
+    const now = Date.now();
+    const elapsed = now - lastStatusShownAt.current;
+    const delay = Math.max(0, STATUS_MIN_DISPLAY_MS - elapsed);
+    if (pendingStatusTimer.current) clearTimeout(pendingStatusTimer.current);
+    pendingStatusTimer.current = setTimeout(() => {
+      setPollingHint(capped);
+      lastStatusText.current = capped;
+      lastStatusShownAt.current = Date.now();
+      pendingStatusTimer.current = null;
+    }, delay);
+  };
+  const clearStatusHint = () => {
+    if (pendingStatusTimer.current) {
+      clearTimeout(pendingStatusTimer.current);
+      pendingStatusTimer.current = null;
+    }
+    lastStatusText.current = null;
+    lastStatusShownAt.current = 0;
+    statusReceivedEver.current = false;
+    setPollingHint(null);
+  };
+  // Unmount cleanup - prevents setState-on-unmounted-component if a queued status
+  // hint fires after the widget is removed from the DOM.
+  useEffect(() => {
+    return () => {
+      if (pendingStatusTimer.current) {
+        clearTimeout(pendingStatusTimer.current);
+        pendingStatusTimer.current = null;
+      }
+    };
+  }, []);
   const [historyAvailable, setHistoryAvailable] = useState(false);
   const [viewingThread, setViewingThread] = useState(null); // threadId of loaded history
   const [threadLoading, setThreadLoading] = useState(false);
@@ -170,13 +217,13 @@ const ChatWidget = () => {
           } catch { /* silent - user can still fetch on click */ }
         }
       } else {
-        // No threads - close panel even if localStorage said open
-        setHistoryOpen(false);
-        try { localStorage.removeItem("dm_history_open"); } catch { /* ignore */ }
+        // No threads yet - button still available, panel shows empty state
+        setHistoryAvailable(true);
         setHistoryLoading(false);
       }
     } catch (err) {
       console.error("[Widget] Failed to load history:", err);
+      setHistoryAvailable(true);
       setHistoryError(true);
       setHistoryLoading(false);
     }
@@ -267,7 +314,7 @@ const ChatWidget = () => {
             }]);
           }
           setLoading(false);
-          setPollingHint(null);
+          clearStatusHint();
           setConnectionStatus(botText ? "online" : "error");
         } else {
           // Cache completed threads
@@ -338,7 +385,7 @@ const ChatWidget = () => {
     // Fetch from API
     const result = await smartspaceService.getThread(threadId);
     if (result.success && result.messages) {
-      const parsed = result.messages.map(m => ({ id: nextMsgId(), sender: m.sender, text: m.text, isError: false }));
+      const parsed = result.messages.map(m => ({ id: nextMsgId(), sender: m.sender, text: m.sender === "bot" ? preprocessMarkdown(m.text) : m.text, isError: false }));
       cacheThread(threadId, parsed);
       return parsed;
     }
@@ -356,6 +403,58 @@ const ChatWidget = () => {
   };
 
   /**
+   * Render a bot message's markdown to HTML for rich-text clipboard copy.
+   * Uses the same ReactMarkdown config as the live render so the pasted
+   * output matches what the user sees in the widget.
+   */
+  const markdownToHtml = (text) => {
+    return renderToStaticMarkup(
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
+        {text}
+      </ReactMarkdown>
+    );
+  };
+
+  const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+
+  /**
+   * Format messages as HTML for rich-text clipboard copy.
+   */
+  const formatMessagesHtml = (msgs) => {
+    return msgs.map((m) => {
+      const label = m.sender === "user" ? "You" : "Digital Mentor";
+      const body = m.sender === "user"
+        ? `<p>${escapeHtml(m.text).replace(/\n/g, "<br>")}</p>`
+        : markdownToHtml(m.text);
+      return `<p><strong>${label}:</strong></p>${body}`;
+    }).join("<hr>");
+  };
+
+  /**
+   * Write both rich (HTML) and plain variants to the clipboard so the
+   * pasted content keeps formatting in rich-text targets (email, Word,
+   * Google Docs) while staying readable in plain-text targets. Falls back
+   * to plain text if the browser doesn't support ClipboardItem.
+   */
+  const writeRichClipboard = async (html, plain) => {
+    if (typeof window !== "undefined" && window.ClipboardItem && navigator.clipboard?.write) {
+      try {
+        const item = new window.ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        });
+        await navigator.clipboard.write([item]);
+        return;
+      } catch (err) {
+        console.warn("[Widget] Rich clipboard write failed, falling back to plain text:", err);
+      }
+    }
+    await navigator.clipboard.writeText(plain);
+  };
+
+  /**
    * Copy a single thread's conversation to clipboard
    */
   const copyThread = async (threadId, e) => {
@@ -364,7 +463,7 @@ const ChatWidget = () => {
     try {
       const msgs = await getThreadMessages(threadId);
       if (msgs) {
-        await navigator.clipboard.writeText(formatMessages(msgs));
+        await writeRichClipboard(formatMessagesHtml(msgs), formatMessages(msgs));
         showToast("Copied to clipboard");
       }
     } catch (err) {
@@ -558,18 +657,22 @@ const ChatWidget = () => {
    */
   const pollForResponse = async (threadId, sentTime, gen, maxAttempts = POLL_MAX_ATTEMPTS) => {
     console.log(`[Widget] Starting poll for thread ${threadId} (gen=${gen})`);
+    // Default hint shown immediately so the widget feels responsive while we wait for
+    // SmartSpace's first Status emission. Replaced as soon as a real Status arrives.
+    setPollingHint("Thinking...");
 
     for (let i = 0; i < maxAttempts; i++) {
       // Check if this operation has been superseded
       if (operationGen.current !== gen) {
         console.log(`[Widget] Poll aborted - gen ${gen} superseded by ${operationGen.current}`);
-        setPollingHint(null);
+        clearStatusHint();
         return null;
       }
 
-      // Show progress hints during long polls
-      if (i === 10) setPollingHint("Still working on a response...");
-      if (i === 25) setPollingHint("Taking longer than usual. Please wait...");
+      // Fallback hints for queries where SmartSpace doesn't emit a Status field
+      // (legacy flows, tool-less prompts). Only fire if no real status arrived yet.
+      if (i === 10 && !statusReceivedEver.current) setPollingHint("Still working on a response...");
+      if (i === 25 && !statusReceivedEver.current) setPollingHint("Taking longer than usual. Please wait...");
 
       try {
         // Wait before polling (except first attempt)
@@ -592,8 +695,14 @@ const ChatWidget = () => {
         );
 
         console.log(
-          `[Widget] POLL ${i}: Status=${response.status}, DataLength=${response.data?.length || 0}`,
+          `[Widget] POLL ${i}: Status=${response.status}, DataLength=${response.data?.length || 0}, currentStatus=${response.currentStatus || "null"}`,
         );
+
+        // Surface SmartSpace's progressive status (e.g. "Searching meeting minutes...")
+        // if one is present on this poll.
+        if (response.currentStatus) {
+          applyStatusHint(response.currentStatus);
+        }
 
         // Parse the response
         const result = parseBotResponse(response);
@@ -675,6 +784,9 @@ const ChatWidget = () => {
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
+    // Show the default hint immediately - the proxy round-trip is up to ~8s before
+    // polling starts, so without this the user sees dots-only during that window.
+    setPollingHint("Thinking...");
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -759,7 +871,7 @@ const ChatWidget = () => {
       if (operationGen.current !== myGen) {
         isSending.current = false;
         setPending(false);
-        setPollingHint(null);
+        clearStatusHint();
         return;
       }
 
@@ -786,7 +898,7 @@ const ChatWidget = () => {
       }
 
       setLoading(false);
-      setPollingHint(null);
+      clearStatusHint();
       isSending.current = false;
       setPending(false);
     }
@@ -797,7 +909,7 @@ const ChatWidget = () => {
    */
   const copyToClipboard = async (text, idx) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeRichClipboard(markdownToHtml(text), text);
       setCopiedIdx(idx);
       setTimeout(() => setCopiedIdx(null), 2500);
     } catch (err) {
@@ -811,7 +923,7 @@ const ChatWidget = () => {
    */
   const copyConversation = async () => {
     try {
-      await navigator.clipboard.writeText(formatMessages(messages));
+      await writeRichClipboard(formatMessagesHtml(messages), formatMessages(messages));
       showToast("Copied to clipboard");
     } catch (err) {
       console.error('[Widget] Copy conversation failed:', err);
@@ -945,13 +1057,11 @@ const ChatWidget = () => {
         <div className="chat-header">
           <div className="chat-header-left">
             <span className={`status-dot ${connectionStatus}`}></span>
-            {historyAvailable && (
-              <button className={`chat-header-btn history-toggle${historyOpen ? ' active' : ''}`} onClick={toggleHistory} aria-label="Conversation history" title="Conversation history">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-                </svg>
-              </button>
-            )}
+            <button className={`chat-header-btn history-toggle${historyOpen ? ' active' : ''}`} onClick={toggleHistory} disabled={!historyAvailable} aria-label="Conversation history" title="Conversation history">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </button>
           </div>
           <div className="chat-header-actions">
             {viewingThread && (

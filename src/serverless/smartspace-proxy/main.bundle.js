@@ -14990,6 +14990,7 @@ var require_axios = __commonJS({
 var axios = require_axios();
 var cachedToken = null;
 var tokenExpiry = 0;
+var tokenPromise = null;
 var TENANT_ID = process.env.TENANT_ID;
 var CLIENT_ID = process.env.YOUR_APP_CLIENT_ID;
 var CLIENT_SECRET = process.env.YOUR_APP_CLIENT_SECRET;
@@ -14998,7 +14999,13 @@ var SMARTSPACE_WORKSPACE_ID = process.env.SMARTSPACE_WORKSPACE_ID;
 var SMARTSPACE_API_URL = process.env.SMARTSPACE_CHAT_API_URL;
 async function getAuthToken() {
   const now = Date.now();
-  if (!cachedToken || now >= tokenExpiry - 12e4) {
+  if (cachedToken && now < tokenExpiry - 12e4) {
+    return cachedToken;
+  }
+  if (tokenPromise) {
+    return tokenPromise;
+  }
+  tokenPromise = (async () => {
     try {
       const tokenResponse = await axios.post(
         `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
@@ -15011,32 +15018,22 @@ async function getAuthToken() {
         { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
       );
       cachedToken = tokenResponse.data.access_token;
-      tokenExpiry = now + tokenResponse.data.expires_in * 1e3;
+      tokenExpiry = Date.now() + tokenResponse.data.expires_in * 1e3;
+      return cachedToken;
     } catch (error) {
       console.error(
         "Token acquisition failed:",
         error.response?.data || error.message
       );
       throw new Error("Authentication failed");
+    } finally {
+      tokenPromise = null;
     }
-  }
-  return cachedToken;
+  })();
+  return tokenPromise;
 }
-var HUBSPOT_TOKEN = process.env.private_token;
-var THREAD_STORE_EMAILS = [
-  "rbraamburg@bacpartners.com.au",
-  "katrina@bmnz.org.nz",
-  "colin@bmnz.org.nz",
-  "june@bmnz.org.nz",
-  "david.altena@smartspace.ai",
-  "sarah@bmnz.org.nz",
-  "duriemk@gmail.com",
-  "justin@flitter.co.nz"
-];
+var HUBSPOT_TOKEN = process.env.bac_private_token;
 async function storeThreadId(email, threadId) {
-  if (!THREAD_STORE_EMAILS.includes(email.toLowerCase())) {
-    return;
-  }
   try {
     const searchRes = await axios.post(
       "https://api.hubapi.com/crm/v3/objects/contacts/search",
@@ -15044,7 +15041,9 @@ async function storeThreadId(email, threadId) {
         filterGroups: [{ filters: [{ propertyName: "email", operator: "EQ", value: email }] }],
         properties: ["smartspace_thread_ids"]
       },
-      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 5e3 }
+      // Tight timeout — storeThreadId is fire-and-forget; its tail must drain quickly
+      // so it doesn't extend the Lambda event loop past HubSpot's 10s kill.
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 2e3 }
     );
     const contact = searchRes.data.results?.[0];
     if (!contact) {
@@ -15066,7 +15065,7 @@ async function storeThreadId(email, threadId) {
     await axios.patch(
       `https://api.hubapi.com/crm/v3/objects/contacts/${contact.id}`,
       { properties: { smartspace_thread_ids: JSON.stringify(threadIds) } },
-      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 5e3 }
+      { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}`, "Content-Type": "application/json" }, timeout: 2e3 }
     );
     console.log(`[THREAD-STORE] Stored thread ${threadId} for ${email} (total: ${threadIds.length})`);
   } catch (err) {
@@ -15103,6 +15102,12 @@ exports.main = async (context, sendResponse) => {
   if (!action || !VALID_ACTIONS.includes(action)) {
     return sendResponse({
       body: { success: false, error: "Invalid action" },
+      statusCode: 400
+    });
+  }
+  if (!payload && action !== "getHistory") {
+    return sendResponse({
+      body: { success: false, error: "Missing payload" },
       statusCode: 400
     });
   }
@@ -15164,36 +15169,56 @@ exports.main = async (context, sendResponse) => {
         });
       }
       const isFirstMessage = !threadId;
+      let activeThreadId = threadId;
+      if (isFirstMessage) {
+        try {
+          console.log("[CHAT] Creating thread first (two-step pattern)");
+          const threadResponse = await axios.post(
+            `${SMARTSPACE_API_URL}/workspaces/${SMARTSPACE_WORKSPACE_ID}/messagethreads`,
+            { name: chatMsg.substring(0, 120) },
+            { headers: authHeader, timeout: 5e3 }
+          );
+          activeThreadId = threadResponse.data.id;
+          console.log(`[CHAT] Thread created: ${activeThreadId}`);
+          storeThreadId(userEmail, activeThreadId);
+        } catch (createError) {
+          console.error("[CHAT] Failed to create thread:", createError.message);
+          return sendResponse({
+            body: {
+              success: false,
+              error: "Failed to start conversation",
+              message: "The chat service is temporarily unavailable. Please try again.",
+              canRetry: true,
+              timestamp: (/* @__PURE__ */ new Date()).toISOString()
+            },
+            statusCode: 200
+          });
+        }
+      }
       const smartspacePayload = {
         workSpaceId: SMARTSPACE_WORKSPACE_ID,
+        messageThreadId: activeThreadId,
         inputs: [
           { name: "prompt", value: [{ text: chatMsg }] },
           { name: "email", value: userEmail }
         ]
       };
-      if (threadId) {
-        smartspacePayload.messageThreadId = threadId;
-      }
-      console.log(`[CHAT] Sending (first=${isFirstMessage}, thread=${threadId || "new"})`);
+      console.log(`[CHAT] Sending message (first=${isFirstMessage}, thread=${activeThreadId})`);
       try {
         const apiResponse = await axios.post(
           `${SMARTSPACE_API_URL}/messages`,
           smartspacePayload,
           {
             headers: authHeader,
-            timeout: 7e3
-            // Must be under HubSpot's 10s execution limit
+            timeout: 4e3
+            // Kept tight so thread_create + message_send stays under HubSpot's 10s kill.
           }
         );
-        const responseThreadId = apiResponse.data.messageThreadId || threadId;
-        console.log(`[CHAT] Response received (thread=${responseThreadId})`);
-        if (isFirstMessage && responseThreadId) {
-          storeThreadId(userEmail, responseThreadId);
-        }
+        console.log(`[CHAT] Response received (thread=${activeThreadId})`);
         return sendResponse({
           body: {
             success: true,
-            messageThreadId: responseThreadId,
+            messageThreadId: activeThreadId,
             messageId: apiResponse.data.id,
             status: "accepted",
             timestamp: (/* @__PURE__ */ new Date()).toISOString()
@@ -15201,106 +15226,24 @@ exports.main = async (context, sendResponse) => {
           statusCode: 200
         });
       } catch (chatError) {
-        console.error("[CHAT] SmartSpace API Error:", {
-          status: chatError.response?.status,
-          statusText: chatError.response?.statusText,
-          data: chatError.response?.data,
-          message: chatError.message,
-          isTimeout: chatError.code === "ECONNABORTED",
-          isFirstMessage
-        });
-        if (isFirstMessage && chatError.code === "ECONNABORTED") {
-          console.log(
-            "[CHAT] First message timed out - trying to find the created thread"
-          );
-          try {
-            const threadsResponse = await axios.get(
-              `${SMARTSPACE_API_URL}/WorkSpaces/${SMARTSPACE_WORKSPACE_ID}/messageThreads?take=5`,
-              {
-                headers: authHeader,
-                timeout: 2e3
-              }
-            );
-            console.log(
-              `[CHAT] Found ${threadsResponse.data.data?.length || 0} recent threads`
-            );
-            const now = (/* @__PURE__ */ new Date()).getTime();
-            const recentThreads = (threadsResponse.data.data || []).filter(
-              (thread) => {
-                const createdAt = new Date(thread.createdAt).getTime();
-                const ageSeconds = (now - createdAt) / 1e3;
-                return ageSeconds < 30;
-              }
-            );
-            let ownedThread = null;
-            for (const candidate of recentThreads) {
-              try {
-                const threadMsgs = await axios.get(
-                  `${SMARTSPACE_API_URL}/messagethreads/${candidate.id}/messages?take=1&skip=0`,
-                  { headers: authHeader, timeout: 2e3 }
-                );
-                const firstMsg = threadMsgs.data.data?.[0];
-                const threadEmail = firstMsg?.values?.find(
-                  (v) => v.name === "email" && v.type === "Input"
-                )?.value;
-                if (threadEmail === userEmail) {
-                  ownedThread = candidate;
-                  break;
-                }
-                console.warn(
-                  `[CHAT] Thread ${candidate.id} belongs to a different user \u2014 skipping`
-                );
-              } catch (verifyError) {
-                console.warn(
-                  `[CHAT] Could not verify thread ${candidate.id}:`,
-                  verifyError.message
-                );
-              }
-            }
-            if (ownedThread) {
-              console.log(
-                `[CHAT] Found verified thread: ${ownedThread.id}`
-              );
-              storeThreadId(userEmail, ownedThread.id);
-              return sendResponse({
-                body: {
-                  success: true,
-                  messageThreadId: ownedThread.id,
-                  status: "timeout_with_thread",
-                  message: "Message was sent but response is pending",
-                  timestamp: (/* @__PURE__ */ new Date()).toISOString()
-                },
-                statusCode: 200
-              });
-            }
-            console.warn(
-              "[CHAT] No recent thread found, message may have failed"
-            );
-          } catch (findThreadError) {
-            console.error(
-              "[CHAT] Failed to find created thread:",
-              findThreadError.message
-            );
-          }
-          return sendResponse({
-            body: {
-              success: false,
-              error: "First message timeout",
-              message: "The chat service is taking longer than expected. Please try again.",
-              canRetry: true,
-              timestamp: (/* @__PURE__ */ new Date()).toISOString()
-            },
-            statusCode: 200
-            // Return 200 so frontend can handle gracefully
+        const isTimeout = chatError.code === "ECONNABORTED";
+        if (isTimeout) {
+          console.warn(`[CHAT] Message send timed out (${isFirstMessage ? "first" : "follow-up"}) - returning polling_required`);
+        } else {
+          console.error("[CHAT] SmartSpace API Error:", {
+            status: chatError.response?.status,
+            statusText: chatError.response?.statusText,
+            data: chatError.response?.data,
+            message: chatError.message
           });
         }
-        if (threadId) {
+        if (activeThreadId) {
           return sendResponse({
             body: {
               success: true,
-              messageThreadId: threadId,
+              messageThreadId: activeThreadId,
               status: "polling_required",
-              error: chatError.response?.data || chatError.message
+              error: "Message delivery uncertain"
             },
             statusCode: 200
           });
@@ -15323,13 +15266,13 @@ exports.main = async (context, sendResponse) => {
         const [threadRes, messagesRes] = await Promise.all([
           axios.get(`${SMARTSPACE_API_URL}/MessageThreads/${messageThreadId}`, {
             headers: authHeader,
-            timeout: 8e3
+            timeout: 5e3
           }),
           axios.get(
             `${SMARTSPACE_API_URL}/messagethreads/${messageThreadId}/messages?take=5&skip=0`,
             {
               headers: authHeader,
-              timeout: 8e3
+              timeout: 5e3
             }
           )
         ]);
@@ -15340,6 +15283,27 @@ exports.main = async (context, sendResponse) => {
           `[STATUS] Messages count: ${messagesRes.data.data?.length || 0}`
         );
         const messages = messagesRes.data.data || [];
+        const extractText = (raw) => {
+          if (!raw) return null;
+          if (typeof raw === "string") return raw;
+          if (Array.isArray(raw) && raw.length > 0) {
+            const last = raw[raw.length - 1];
+            if (typeof last === "string") return last;
+            if (last && typeof last.text === "string") return last.text;
+          }
+          if (typeof raw === "object" && typeof raw.text === "string") return raw.text;
+          return null;
+        };
+        let latestStatusText = null;
+        for (const msg of messages) {
+          const statusValues = (msg.values || []).filter(
+            (v) => (v.type === "Output" || String(v.type) === "2") && v.name === "Status"
+          );
+          if (statusValues.length > 0) {
+            latestStatusText = extractText(statusValues[statusValues.length - 1].value);
+            if (latestStatusText) break;
+          }
+        }
         let latestOutputMessage = null;
         for (const msg of messages) {
           const hasOutput = msg.values?.some(
@@ -15351,13 +15315,14 @@ exports.main = async (context, sendResponse) => {
           }
         }
         if (!latestOutputMessage) {
-          console.log(`[STATUS] No output message found yet`);
+          console.log(`[STATUS] No output message found yet (currentStatus=${latestStatusText || "null"})`);
           return sendResponse({
             body: {
               success: true,
               status: threadRes.data.isFlowRunning ? "processing" : "no_response",
               data: [],
-              messageThreadId
+              messageThreadId,
+              currentStatus: latestStatusText
             },
             statusCode: 200
           });
@@ -15390,7 +15355,8 @@ exports.main = async (context, sendResponse) => {
             success: true,
             status: threadRes.data.isFlowRunning ? "processing" : "stale",
             data: [],
-            messageThreadId
+            messageThreadId,
+            currentStatus: latestStatusText
           },
           statusCode: 200
         });
@@ -15402,7 +15368,7 @@ exports.main = async (context, sendResponse) => {
         });
         return sendResponse({
           body: {
-            success: true,
+            success: false,
             status: "error_retry",
             data: [],
             messageThreadId,
@@ -15504,7 +15470,7 @@ exports.main = async (context, sendResponse) => {
       } catch (historyError) {
         console.error("[HISTORY] Error:", historyError.message);
         return sendResponse({
-          body: { success: true, threads: [], error: historyError.message },
+          body: { success: false, threads: [], error: historyError.message },
           statusCode: 200
         });
       }
@@ -15544,7 +15510,7 @@ exports.main = async (context, sendResponse) => {
           }
         }
         const parsed = [];
-        for (const msg of allMessages.reverse()) {
+        for (const msg of [...allMessages].reverse()) {
           const promptVal = msg.values?.find(
             (v) => v.name === "prompt" && v.type === "Input"
           )?.value;
@@ -15652,8 +15618,7 @@ exports.main = async (context, sendResponse) => {
     return sendResponse({
       body: {
         success: false,
-        error: "Proxy Failure",
-        details: errorData,
+        error: "An internal error occurred",
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       },
       statusCode: 500

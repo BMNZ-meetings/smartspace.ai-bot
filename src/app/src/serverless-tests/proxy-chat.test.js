@@ -11,6 +11,13 @@ function mockAxiosForChat(mockPost, mockPatch, overrides = {}) {
         data: { access_token: "test-token", expires_in: 3600 },
       });
     }
+    if (url.includes("/messagethreads")) {
+      return Promise.resolve(
+        overrides.threadCreateResponse || {
+          data: { id: VALID_THREAD_ID },
+        },
+      );
+    }
     if (url.includes("/messages")) {
       return Promise.resolve(
         overrides.messagesResponse || {
@@ -95,7 +102,7 @@ describe("proxy chat action", () => {
     expect(sentPayload.messageThreadId).toBe(VALID_THREAD_ID);
   });
 
-  it("omits messageThreadId for first messages", async () => {
+  it("creates thread first for first messages, then sends message with that threadId", async () => {
     mockAxiosForChat(mockPost, mockPatch);
 
     const ctx = makeContext({
@@ -105,11 +112,18 @@ describe("proxy chat action", () => {
 
     await proxyMain(ctx, sendResponse);
 
+    // Should have called /messagethreads first
+    const threadCreateCall = mockPost.mock.calls.find(
+      ([url]) => url.includes("/messagethreads"),
+    );
+    expect(threadCreateCall).toBeDefined();
+
+    // Then /messages with the pre-created threadId
     const smartspaceCall = mockPost.mock.calls.find(
-      ([url]) => url.includes("/messages"),
+      ([url]) => url.includes("/messages") && !url.includes("/messagethreads"),
     );
     const [, sentPayload] = smartspaceCall;
-    expect(sentPayload).not.toHaveProperty("messageThreadId");
+    expect(sentPayload.messageThreadId).toBe(VALID_THREAD_ID);
   });
 
   it("returns messageThreadId on success", async () => {
